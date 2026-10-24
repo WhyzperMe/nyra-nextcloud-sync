@@ -10,6 +10,8 @@ export class FakeNextcloudDav implements HttpTransport {
   private etag = 1000;
   failChunkName: string | null = null;
   reuseEtagOnNextUpdate = false;
+  /** Real Nextcloud behavior: the file ETag only changes when the stored mtime changes. */
+  etagFollowsMtime = false;
   rangeGets = 0;
   chunkPuts = 0;
 
@@ -69,9 +71,12 @@ export class FakeNextcloudDav implements HttpTransport {
     const match=request.headers?.["If-Match"];
     if(match && (!existing || existing.etag!==match)) return response(412);
     const body=typeof request.body === "string" ? new TextEncoder().encode(request.body) : new Uint8Array(request.body ?? new ArrayBuffer(0));
-    const etag = existing && this.reuseEtagOnNextUpdate ? existing.etag : this.nextEtag();
+    const sourceMtime=request.headers?.["X-OC-MTime"];
+    const mtime=(sourceMtime && /^[0-9]+$/.test(sourceMtime) ? new Date(Number(sourceMtime)*1000) : new Date()).toUTCString();
+    const sameStoredMtime=!!existing && existing.mtime===mtime;
+    const etag = existing && (this.reuseEtagOnNextUpdate || (this.etagFollowsMtime && sameStoredMtime)) ? existing.etag : this.nextEtag();
     if (existing) this.reuseEtagOnNextUpdate = false;
-    this.files.set(key,{bytes:new Uint8Array(body),fileId:existing?.fileId ?? String(this.id++),etag,mtime:new Date().toUTCString()});
+    this.files.set(key,{bytes:new Uint8Array(body),fileId:existing?.fileId ?? String(this.id++),etag,mtime});
     if(/^\d{5}$/.test(name)) this.chunkPuts += 1;
     return response(existing ? 204 : 201);
   }

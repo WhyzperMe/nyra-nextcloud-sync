@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.18.2
+
+- **Fixes "Remote writes are paused: Nextcloud did not advance the ETag":** Nextcloud only changes a file's ETag when its stored modification time changes, so rewriting a file with the same source mtime kept the old ETag even though the bytes changed. The server-safety check no longer pauses on this. Every conditional update now carries a modification time whose second differs from the remote file's current one, so the ETag reliably advances and a concurrent same-second edit from another device is still detected. The safety check tests exactly that behavior and still pauses when a server truly keeps the ETag.
+- Test server now models this ETag-follows-mtime behavior; new tests cover the probe, real updates with an equal source mtime and the mtime rule.
+
 ## 0.18.1
 
 - **Clearer ETag diagnostics:** when the server-safety check pauses remote writes because Nextcloud did not advance the ETag after an immediate update, the message now says what happened (ETag unchanged, file id changed or no ETag), at which update and folder, with the observed values.

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Logger } from "../src/diagnostics/logger";
 import type { HttpRequest, HttpTransport } from "../src/network/http-client";
-import { RemoteTransactionalMutator } from "../src/execution/remote-mutator";
+import { RemoteTransactionalMutator, distinctUploadMtimeMs } from "../src/execution/remote-mutator";
 import { TransferJournalStore } from "../src/transfer/journal";
 import type { TransferJournalPayload } from "../src/transfer/types";
 import { FakeNextcloudDav } from "./helpers/fake-nextcloud";
@@ -42,18 +42,48 @@ describe("live conditional-write capability fence", () => {
     expect(dav.fileUrls()).toEqual([]);
   });
 
-  it("tests changed contents at a fixed source mtime without depending on network speed", async () => {
+  it("accepts real Nextcloud behavior where the ETag only follows the stored mtime", async () => {
     const dav = new FakeNextcloudDav(serverUrl, userId);
-    const mtimes: Array<string | undefined> = [];
+    dav.etagFollowsMtime = true;
+    await expect(makeMutator(dav).verifyConditionalWrites("Obsidian")).resolves.toBeUndefined();
+    expect(dav.fileUrls()).toEqual([]);
+  });
+
+  it("sends every conditional probe update with an mtime that differs from the stored one", async () => {
+    const dav = new FakeNextcloudDav(serverUrl, userId);
+    dav.etagFollowsMtime = true;
+    const updateMtimes: number[] = [];
     const transport: HttpTransport = { request: async (input) => {
-      if (input.method === "PUT") mtimes.push(input.headers?.["X-OC-MTime"]);
-      return await dav.request(input);
+      const reply = await dav.request(input);
+      if (input.method === "PUT" && input.headers?.["If-Match"] && input.headers["X-OC-MTime"] && reply.status !== 412) updateMtimes.push(Number(input.headers["X-OC-MTime"]));
+      return reply;
     } };
     await makeMutator(transport).verifyConditionalWrites();
-    expect(mtimes.length >= 4).toBe(true);
-    expect(mtimes[0]).toMatch(/^\d+$/);
-    expect(mtimes.every((mtime) => mtime === mtimes[0])).toBe(true);
+    expect(updateMtimes.length >= 3).toBe(true);
+    for (let index = 1; index < updateMtimes.length; index += 1) expect(updateMtimes[index]).not.toBe(updateMtimes[index - 1]);
     expect(dav.fileUrls()).toEqual([]);
+  });
+
+  it("advances the ETag of a real update whose source mtime equals the stored remote mtime", async () => {
+    const dav = new FakeNextcloudDav(serverUrl, userId);
+    dav.etagFollowsMtime = true;
+    const mutator = makeMutator(dav);
+    const root = `${serverUrl}/remote.php/dav/files/${userId}/`;
+    await dav.request({ url: root, method: "MKCOL" } as HttpRequest);
+    const url = `${root}note.md`;
+    const sourceMtimeMs = 1_700_000_000_000;
+    const created = await mutator.uploadCreate(url, "note.md", new TextEncoder().encode("aaaa").buffer, sourceMtimeMs);
+    const updated = await mutator.uploadUpdate(url, "note.md", new TextEncoder().encode("bbbb").buffer, created.remote.fileId, created.remote.etag, sourceMtimeMs);
+    expect(updated.remote.etag).not.toBe(created.remote.etag);
+    expect(updated.remote.fileId).toBe(created.remote.fileId);
+  });
+
+  it("only moves an upload mtime when it would collide with the stored remote second", () => {
+    expect(distinctUploadMtimeMs(1_700_000_000_400, 1_700_000_000_900)).toBe(1_700_000_001_000);
+    expect(distinctUploadMtimeMs(1_700_000_005_000, 1_700_000_000_000)).toBe(1_700_000_005_000);
+    expect(distinctUploadMtimeMs(1_700_000_005_500, null)).toBe(1_700_000_005_500);
+    expect(distinctUploadMtimeMs(null, null)).toBeNull();
+    expect(distinctUploadMtimeMs(null, 1_000)).not.toBeNull();
   });
 
   it("blocks ignored stale DELETE and MOVE preconditions and cleans both possible probe locations", async () => {

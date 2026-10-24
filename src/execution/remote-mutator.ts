@@ -104,7 +104,8 @@ export class RemoteTransactionalMutator {
     const forbidden = new TextEncoder().encode("nyra-conditional-probe-forbidden\n");
     // Real uploads preserve the source mtime. Hold it fixed across changed probe
     // bodies, which also exercises rapid-edit safety on a slow DAV connection.
-    const probeMtime = mtimeHeader(Date.now());
+    const probeMtimeMs = Date.now();
+    const probeMtime = mtimeHeader(probeMtimeMs);
     const ownBodies: Uint8Array[] = [first, forbidden];
     let initialFileId: string | null = null;
     let failure: unknown = null;
@@ -120,11 +121,10 @@ export class RemoteTransactionalMutator {
       let previous = initial;
       let finalBody = first;
       let rejectedEtag = initial.etag;
-      let sameSecondVerified = false;
-      for (let attempt = 0; attempt < 5; attempt += 1) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
         const body = new TextEncoder().encode(`nyra-conditional-probe-${attempt + 2}\n`);
         ownBodies.push(body);
-        const updated = await this.requestWithRetry({ url: probeUrl, method: "PUT", headers: this.headers({ "If-Match": previous.etag!, ...probeMtime }), body: body.buffer }, false);
+        const updated = await this.requestWithRetry({ url: probeUrl, method: "PUT", headers: this.headers({ "If-Match": previous.etag!, ...mtimeHeader(distinctUploadMtimeMs(probeMtimeMs, previous.mtimeMs)) }), body: body.buffer }, false);
         this.assertSuccess(updated, [200, 204], "update conditional-write probe");
         const after = await this.stat(probeUrl, probePath);
         if (after.fileId !== initialFileId || !after.etag || after.etag === previous.etag) {
@@ -135,12 +135,9 @@ export class RemoteTransactionalMutator {
         const stale = await this.requestWithRetry({ url: probeUrl, method: "PUT", headers: this.headers({ "If-Match": previous.etag!, ...probeMtime }), body: forbidden.buffer }, false);
         if (stale.status !== 412) throw new NyraError("remote-precondition-unreliable", "Nextcloud accepted a stale If-Match PUT; remote writes are paused to avoid overwriting concurrent edits.");
         rejectedEtag = previous.etag!;
-        sameSecondVerified = previous.mtimeMs !== null && after.mtimeMs === previous.mtimeMs;
         previous = after;
         finalBody = body;
-        if (sameSecondVerified) break;
       }
-      if (!sameSecondVerified) throw new NyraError("remote-precondition-unreliable", "Nextcloud same-second ETag safety could not be verified; remote writes are paused.");
       const verified = await this.verifyRemoteContent(probeUrl, probePath, initialFileId, previous.etag);
       if (verified.contentHash !== await sha256Hex(finalBody)) throw new Error("Nextcloud conditional-write probe content changed unexpectedly.");
       const staleDelete = await this.requestWithRetry({ url: probeUrl, method: "DELETE", headers: this.headers({ "If-Match": rejectedEtag }) }, false);
@@ -373,7 +370,7 @@ export class RemoteTransactionalMutator {
     const expectedHash = await sha256Hex(bytes);
     try {
       const response = await this.requestWithRetry({
-        url, method: "PUT", headers: this.headers({ "If-Match": expectedEtag, "Content-Type": "application/octet-stream", "X-Hash": "sha256", ...mtimeHeader(mtimeMs) }), body: bytes
+        url, method: "PUT", headers: this.headers({ "If-Match": expectedEtag, "Content-Type": "application/octet-stream", "X-Hash": "sha256", ...mtimeHeader(distinctUploadMtimeMs(mtimeMs, before.mtimeMs)) }), body: bytes
       }, false);
       if (response.status === 412) throw new NyraError("sync-precondition-changed", `Remote update precondition failed for '${path}': ETag changed.`);
       this.assertSuccess(response, [200, 201, 204], `update '${path}'`);
@@ -1098,6 +1095,18 @@ function exponentialDelayMs(attempt: number, random: () => number): number {
   return Math.round(base * (0.85 + random() * 0.3));
 }
 function ensureTrailingSlash(value: string): string { return value.endsWith("/") ? value : `${value}/`; }
+/**
+ * Nextcloud derives a file's ETag from its stored mtime: rewriting a file with the same X-OC-MTime keeps the
+ * old ETag even though the bytes changed. A conditional update must therefore always carry an mtime whose
+ * second differs from the remote file's current one, otherwise a concurrent same-second edit would go unnoticed.
+ */
+export function distinctUploadMtimeMs(desiredMs: number | null | undefined, remoteMtimeMs: number | null | undefined): number | null {
+  const wanted = desiredMs !== null && desiredMs !== undefined && Number.isFinite(desiredMs) && desiredMs >= 0 ? desiredMs : null;
+  if (remoteMtimeMs === null || remoteMtimeMs === undefined || !Number.isFinite(remoteMtimeMs)) return wanted;
+  const seconds = Math.floor((wanted ?? Date.now()) / 1000);
+  return seconds === Math.floor(remoteMtimeMs / 1000) ? (seconds + 1) * 1000 : seconds * 1000;
+}
+
 function mtimeHeader(mtimeMs: number | null | undefined): Record<string, string> {
   if (mtimeMs === null || mtimeMs === undefined || !Number.isFinite(mtimeMs) || mtimeMs < 0) return {};
   return { "X-OC-MTime": String(Math.floor(mtimeMs / 1000)) };
