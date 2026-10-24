@@ -26,4 +26,4 @@ Development dependencies are locked and audited; there are no runtime dependenci
 
 ## Report a vulnerability
 
-Use private GitHub vulnerability reporting when available. Never post credentials, vault contents or unredacted logs publicly. If private reporting is unavailable, ask for a private contact without including exploit data or secrets.
+Use private GitHub vulnerability reporting when available. Never post credentials, vault contents or unredacted logs publicly. If private reporting is unavailable, ask for a private contact without including exploit data or secrets. You can write me an email but i prefer GitHub vulnerability reporting.
