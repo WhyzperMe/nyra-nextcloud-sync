@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.18.6
+
+- **Cleans up the leftover `etag-probe…` files that other sync clients complained about** ("file names containing ? are not supported", for example in the Nextcloud desktop client). Older versions created these short-lived connection-check files with an icon and `# ? %` in the name and, on some clients, could not delete them again, so they piled up in `.nyra-nextcloud-sync-runtime`. Before each safety check Nyra now deletes stale `etag-probe*` files (small, untouched for ten minutes, removed with their own ETag) in that folder; young probes of another device and every other file are left alone.
+- The check itself uses plain ASCII names since 0.18.4 and cleans up reliably since 0.18.5. Update every device (iPad too): a device that still runs an older version keeps creating the old files.
+
 ## 0.18.5
 
 - **Fixes "move conditional-write probe failed with HTTP 412 … An If-None-Match header was specified, but the ETag matched" on iPad:** Nyra never sent an `If-None-Match` with that request. The iOS HTTP stack cached the earlier download of the same file and added its own `If-None-Match` validator to the following rename/write, so Nextcloud refused a perfectly valid, unchanged file. (This would also have blocked uploading a note after it had been downloaded on the iPad.)

@@ -97,6 +97,7 @@ export class RemoteTransactionalMutator {
   private async verifyConditionalWritesAtRoot(rootPath: string): Promise<void> {
     const runtimePath = rootPath ? `${rootPath}/${INTERNAL_RUNTIME_ROOT}` : INTERNAL_RUNTIME_ROOT;
     await this.ensureDirectoryPath(this.options.webdavUserRoot, runtimePath);
+    await this.sweepStaleProbes(runtimePath);
     const probePath = `${runtimePath}/${randomId("etag-probe")}.txt`;
     const probeUrl = appendWebdavPath(this.options.webdavUserRoot, probePath);
     // Probe names are plain ASCII on purpose: the checks are about preconditions, not file names
@@ -1051,6 +1052,38 @@ export class RemoteTransactionalMutator {
   private assertIdentity(remote: RemoteReplicaState, expectedFileId: string | null, expectedEtag: string | null, path: string): void {
     if (expectedFileId && remote.fileId !== expectedFileId) throw new NyraError("sync-precondition-changed", `Remote identity precondition failed for '${path}'.`);
     if (expectedEtag && remote.etag !== expectedEtag) throw new NyraError("sync-precondition-changed", `Remote ETag precondition failed for '${path}'.`);
+  }
+
+  /**
+   * Removes probe files that an earlier, interrupted or failed check left behind (older versions could not
+   * clean up on some clients, and other sync clients then showed them as errors). Only small files named
+   * `etag-probe*` that have not been touched for ten minutes are deleted, each with its own ETag; anything
+   * else, and any failure, is left alone.
+   */
+  private async sweepStaleProbes(runtimePath: string): Promise<void> {
+    try {
+      const folderUrl = ensureTrailingSlash(appendWebdavPath(this.options.webdavUserRoot, runtimePath));
+      const response = await this.requestWithRetry({
+        url: folderUrl, method: "PROPFIND", contentType: "application/xml; charset=utf-8",
+        headers: this.headers({ Depth: "1", Accept: "application/xml, text/xml;q=0.9" }), body: PROPFIND_BODY
+      });
+      if (response.status !== 207) return;
+      const now = Date.now();
+      let removed = 0;
+      for (const row of parseDavMultistatus(response.text)) {
+        if (row.isCollection || !row.etag || row.size === null || row.size > 1024 || removed >= 50) continue;
+        const name = decodeURIComponent(row.href.split("?")[0]!.replace(/[/]+$/, "").split("/").pop() ?? "");
+        if (!name.startsWith("etag-probe")) continue;
+        const modified = row.lastModified ? Date.parse(row.lastModified) : NaN;
+        if (!Number.isFinite(modified) || now - modified < 10 * 60_000) continue;
+        const target = appendWebdavPath(this.options.webdavUserRoot, `${runtimePath}/${name}`);
+        const removal = await this.requestWithRetry({ url: target, method: "DELETE", headers: this.headers({ "If-Match": row.etag }) }, false);
+        if ([204, 404].includes(removal.status)) removed += 1;
+      }
+      if (removed > 0) this.logger.info("remote.stale-probes-removed", { removed });
+    } catch (error) {
+      this.logger.warn("remote.stale-probe-sweep-failed", { error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   /**

@@ -199,6 +199,30 @@ describe("live conditional-write capability fence", () => {
     expect(withCacheBuster("not a url")).toBe("not a url");
   });
 
+  it("removes stale probe files left by older versions but never young probes or other files", async () => {
+    const dav = new FakeNextcloudDav(serverUrl, userId);
+    const root = `${serverUrl}/remote.php/dav/files/${userId}/`;
+    const runtime = `${root}.nyra-nextcloud-sync-runtime/`;
+    await dav.request({ url: runtime, method: "MKCOL" } as HttpRequest);
+    const put = async (name: string, mtimeSeconds: number): Promise<string> => {
+      const url = `${runtime}${encodeURIComponent(name)}`;
+      await dav.request({ url, method: "PUT", headers: { "X-OC-MTime": String(mtimeSeconds) }, body: new TextEncoder().encode("probe").buffer });
+      return url;
+    };
+    const old = Math.floor(Date.now() / 1000) - 3600;
+    const stale = await put("etag-probe_aaaa 📝 #? %.txt", old);
+    const staleAscii = await put("etag-probe_bbbb.txt", old);
+    const young = await put("etag-probe_cccc.txt", Math.floor(Date.now() / 1000));
+    const other = await put("keep-me.txt", old);
+    expect(dav.fileUrls()).toEqual(expect.arrayContaining([stale, staleAscii, young, other]));
+    await makeMutator(dav).verifyConditionalWrites();
+    const left = dav.fileUrls();
+    expect(left).toContain(young);
+    expect(left).toContain(other);
+    expect(left).not.toContain(stale);
+    expect(left).not.toContain(staleAscii);
+  });
+
   it("only moves an upload mtime when it would collide with the stored remote second", () => {
     expect(distinctUploadMtimeMs(1_700_000_000_400, 1_700_000_000_900)).toBe(1_700_000_001_000);
     expect(distinctUploadMtimeMs(1_700_000_005_000, 1_700_000_000_000)).toBe(1_700_000_005_000);
