@@ -1,0 +1,43 @@
+{
+  "name": "nyra-nextcloud-sync",
+  "version": "0.18.0",
+  "description": "Safety-first Nextcloud sync for Obsidian: instant sync, folders and deletions, mass-delete protection, restore and version history, built for desktop and iPad.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit --skipLibCheck",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && node esbuild.config.mjs production",
+    "e2e:live": "node scripts/run-live.mjs e2e/live-e2e.ts",
+    "acceptance:live": "node scripts/run-live.mjs e2e/dav-acceptance.ts",
+    "version": "node scripts/version-bump.mjs && git add manifest.json versions.json",
+    "ui:preview": "node scripts/ui-preview.mjs ui-preview-out"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "nextcloud",
+    "webdav",
+    "sync",
+    "backup",
+    "ios",
+    "ipad",
+    "mobile",
+    "three-way-merge"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "22.15.17",
+    "esbuild": "0.25.5",
+    "obsidian": "1.13.1",
+    "typescript": "5.8.3",
+    "vitest": "4.1.11"
+  },
+  "overrides": {
+    "moment": "2.31.0"
+  },
+  "engines": {
+    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
+  }
+}
