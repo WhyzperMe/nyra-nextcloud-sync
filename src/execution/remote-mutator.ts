@@ -1,6 +1,7 @@
 import { NyraError } from "../core/errors";
 import type { NextcloudCredentials } from "../core/types";
 import type { Logger } from "../diagnostics/logger";
+import { isInjectedIfNoneMatch, withCacheBuster } from "../network/cache-buster";
 import type { HttpRequest, HttpResponse, HttpTransport } from "../network/http-client";
 import { nextcloudEndpoints } from "../nextcloud/endpoints";
 import { parseDavMultistatus } from "../remote/dav-xml";
@@ -1102,7 +1103,13 @@ export class RemoteTransactionalMutator {
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       try {
-        const response = await this.http.request(request);
+        let response = await this.http.request(request);
+        if (isInjectedIfNoneMatch(request, response)) {
+          // This request never carried If-None-Match, so the HTTP stack added it from a cached GET. The write was
+          // refused before it ran; repeat it once on a URL the cache has never seen.
+          this.logger.warn("remote.client-added-if-none-match", { method: request.method ?? "GET" });
+          response = await this.http.request({ ...request, url: withCacheBuster(request.url) });
+        }
         const canRetry = retrySafe && RETRYABLE.has(response.status);
         if (!canRetry || attempt === this.maxAttempts) return response;
         const delay = retryDelayMs(response, attempt, this.randomFn);

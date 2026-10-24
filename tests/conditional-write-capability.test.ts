@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Logger } from "../src/diagnostics/logger";
 import type { HttpRequest, HttpTransport } from "../src/network/http-client";
+import { withCacheBuster } from "../src/network/cache-buster";
 import { RemoteTransactionalMutator, distinctUploadMtimeMs, serverReason } from "../src/execution/remote-mutator";
 import { TransferJournalStore } from "../src/transfer/journal";
 import type { TransferJournalPayload } from "../src/transfer/types";
@@ -152,6 +153,50 @@ describe("live conditional-write capability fence", () => {
     await mutator.uploadUpdate(`${root}c.md`, "c.md", new TextEncoder().encode("delta").buffer, second.remote.fileId, second.remote.etag, 1_700_000_100_000);
     await expect(mutator.move(`${root}c.md`, "c.md", `${root}d.md`, "d.md", second.remote.fileId, second.remote.etag)).rejects.toThrow(/precondition/i);
     reject = false;
+  });
+
+  it("recovers when the HTTP stack adds If-None-Match from a cached GET (iOS) and refuses the write", async () => {
+    const dav = new FakeNextcloudDav(serverUrl, userId);
+    const cached = new Set<string>();
+    let injected = 0;
+    const transport: HttpTransport = { request: async (input) => {
+      const method = input.method ?? "GET";
+      const key = input.url.split("?")[0] ?? input.url;
+      const busted = input.url.includes("nyra_nc=");
+      if (method === "GET" && !busted) cached.add(key);
+      if (method !== "GET" && method !== "PROPFIND" && !busted && cached.has(key) && !input.headers?.["If-None-Match"]) {
+        injected += 1;
+        return { status: 412, headers: {}, arrayBuffer: new ArrayBuffer(0), json: () => ({}), text: "<?xml version=\"1.0\"?><d:error xmlns:d=\"DAV:\" xmlns:s=\"http://sabredav.org/ns\"><s:message>An If-None-Match header was specified, but the ETag matched (or * was specified).</s:message></d:error>" };
+      }
+      return await dav.request(input);
+    } };
+    await expect(makeMutator(transport).verifyConditionalWrites()).resolves.toBeUndefined();
+    expect(injected).toBeGreaterThan(0);
+    expect(dav.fileUrls()).toEqual([]);
+  });
+
+  it("does not retry a refused create-only PUT that itself carried If-None-Match", async () => {
+    const dav = new FakeNextcloudDav(serverUrl, userId);
+    const root = `${serverUrl}/remote.php/dav/files/${userId}/`;
+    let puts = 0;
+    const transport: HttpTransport = { request: async (input) => {
+      if (input.method === "PUT") puts += 1;
+      return await dav.request(input);
+    } };
+    const mutator = makeMutator(transport);
+    await mutator.uploadCreate(`${root}x.md`, "x.md", new TextEncoder().encode("one").buffer, 1_700_000_000_000);
+    await expect(mutator.uploadCreate(`${root}x.md`, "x.md", new TextEncoder().encode("two").buffer, 1_700_000_000_000)).rejects.toThrow();
+    expect(puts).toBe(2);
+  });
+
+  it("adds a fresh unique query parameter to a URL and keeps the path intact", () => {
+    const url = "https://cloud.example.test/remote.php/dav/files/alice/My%20Note%20%23%3F.md";
+    const first = new URL(withCacheBuster(url));
+    const second = new URL(withCacheBuster(url));
+    expect(first.pathname).toBe(new URL(url).pathname);
+    expect(first.searchParams.get("nyra_nc")).toMatch(/^[a-z0-9]+$/);
+    expect(first.search).not.toBe(second.search);
+    expect(withCacheBuster("not a url")).toBe("not a url");
   });
 
   it("only moves an upload mtime when it would collide with the stored remote second", () => {

@@ -2,6 +2,7 @@ import { requestUrl, type RequestUrlParam, type RequestUrlResponse } from "obsid
 import { NyraError, errorMessage } from "../core/errors";
 import type { Logger } from "../diagnostics/logger";
 import { safeUrlForLog } from "../security/redaction";
+import { isInjectedIfNoneMatch, withCacheBuster } from "./cache-buster";
 
 export interface HttpRequest {
   url: string;
@@ -37,15 +38,25 @@ export class HttpClient implements HttpTransport {
   ) {}
 
   async request(request: HttpRequest): Promise<HttpResponse> {
+    const first = await this.send(request);
+    if (!isInjectedIfNoneMatch(request, first)) return first;
+    // The write was refused before it ran; repeat it once on a URL the platform cache has never seen.
+    this.logger.warn("http.client-added-if-none-match", { method: request.method ?? "GET", url: safeUrlForLog(request.url) });
+    return await this.send({ ...request, url: withCacheBuster(request.url) });
+  }
+
+  private async send(request: HttpRequest): Promise<HttpResponse> {
     const method = request.method ?? "GET";
+    // Reads never go through (or into) the platform HTTP cache, so they cannot poison later conditional writes.
+    const url = method === "GET" || method === "HEAD" ? withCacheBuster(request.url) : request.url;
     this.logger.debug("http.request", {
       method,
-      url: safeUrlForLog(request.url),
+      url: safeUrlForLog(url),
       headers: request.headers
     });
 
     const params: RequestUrlParam = {
-      url: request.url,
+      url,
       method,
       throw: false
     };

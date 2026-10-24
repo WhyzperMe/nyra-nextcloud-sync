@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.5
+
+- **Fixes "move conditional-write probe failed with HTTP 412 … An If-None-Match header was specified, but the ETag matched" on iPad:** Nyra never sent an `If-None-Match` with that request. The iOS HTTP stack cached the earlier download of the same file and added its own `If-None-Match` validator to the following rename/write, so Nextcloud refused a perfectly valid, unchanged file. (This would also have blocked uploading a note after it had been downloaded on the iPad.)
+- **Two layers of protection:** every read (GET/HEAD) now goes to a unique URL, so nothing about it can be cached or validated later; and if a write is still refused with a 412 that names an `If-None-Match` the request never carried, it is repeated once on a fresh URL (the refused write never ran, so this is safe). Create-only writes that really send `If-None-Match: *` and ordinary precondition failures are never retried.
+- New tests cover the injected-validator case end to end, the unique read URLs and the cases that must not be retried.
+
 ## 0.18.4
 
 - **Fixes the iPad "move conditional-write probe failed with HTTP 412":** the server-safety check no longer trusts a refused MOVE blindly. A rename with `Overwrite: F` can never destroy data, so after an unexpected answer Nyra looks at the real server state: if the file was already moved (the answer was lost or replayed) the step counts as done, and if Nextcloud rejected a matching ETag although the source is unchanged, the rename is repeated once without `If-Match`. A genuinely changed source still fails. If the check still fails, the message now lists the real state (source present or missing, destination, ETags).
