@@ -9,7 +9,7 @@ import { type TabId, heroDetail, heroStats, heroTitle, heroVariant, renderHeader
 import { renderDeletionSection, renderScopeSection } from "./scope-section";
 import { SyncTreeView } from "./sync-tree-view";
 import { conflictReview, planRow } from "./conflict-review";
-import { captureSettingsView, createSection, metric, restoreDetails, restoreFocus, restoreScroll, statusCard } from "./settings-dom";
+import { appendErrorDetail, captureSettingsView, createSection, metric, restoreDetails, restoreFocus, restoreScroll, statusCard } from "./settings-dom";
 import { autoDetail, autoHeadline, autoTone, capitalize, connectionTone, convergenceDetail, convergenceHeadline, convergenceTone, durableDetail, durableHeadline, encodeRemoteForDisplay, executionDetail, executionHeadline, executionRuntimeText, executionTone, healthDetail, healthHeadline, healthTone, humanState, inventoryTone, localDetail, localHeadline, planNotice, plannerDetail, plannerHeadline, plannerTone, remoteDetail, remoteHeadline, sameCanonicalServer, syncPresentation } from "./settings-text";
 import { needs, plural } from "../core/plural";
 
@@ -206,7 +206,19 @@ export class NyraNextcloudSyncSettingTab extends PluginSettingTab {
       box.appendChild(createIcon("x-circle", 18));
       const text = box.createDiv({ cls: "nyra-nc-alert__text" });
       text.createEl("strong", { text: "Sync is paused" });
-      text.createSpan({ text: message });
+      appendErrorDetail(text, message);
+    }
+    const auto = this.owner.autoSyncSummary();
+    if (auto?.lastError && (auto.status === "error" || auto.status === "attention")) {
+      const box = panel.createDiv({ cls: "nyra-nc-alert nyra-nc-alert--error" });
+      box.appendChild(createIcon("x-circle", 18));
+      const text = box.createDiv({ cls: "nyra-nc-alert__text" });
+      text.createEl("strong", { text: auto.consecutiveFailures > 1 ? `Last sync failed (${auto.consecutiveFailures} times in a row)` : "Last sync failed" });
+      appendErrorDetail(text, auto.lastError);
+      const actions = text.createDiv({ cls: "nyra-nc-alert__actions" });
+      actions.createEl("button", { text: "Try again" }).addEventListener("click", () => {
+        void this.owner.runAutoSyncNow().catch((error: unknown) => new Notice(`Sync failed: ${errorMessage(error)}`, 10_000)).finally(() => this.display());
+      });
     }
     renderPendingDeletions(panel, this.owner, () => this.display());
     const conflicts = this.owner.syncConflictReviews();

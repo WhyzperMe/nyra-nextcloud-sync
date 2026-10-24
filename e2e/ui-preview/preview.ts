@@ -72,6 +72,7 @@ const settings = {
   credentialBinding: connected ? { serverUrl: worst ? `https://${LONG_HOST}` : "https://nextcloud.home.example.com", loginName: "alice", secretId: "nyra-nextcloud-00000000000000000000000000000000" } : null
 };
 
+const LONG_ERROR = "Nextcloud move conditional-write probe failed with HTTP 400 (Destination header could not be parsed). The guarded MOVE of etag-probe_fab0385144044fb28737174dd4c68d1b was refused, remote writes stay paused until the safety check passes again.";
 const activity = [
   ["uploaded", "Projects/NYRA/Roadmap.md", 8], ["downloaded", "Schule/Mathe/Lineare Funktionen.excalidraw.md", 31], ["merged", "Daily/2026-10-21.md", 95],
   ["folder-created", "Projects/Ideas", 190], ["moved", "Inbox/Scan 04.pdf", 420], ["deleted-on-server", "Archive/old-draft.md", 700],
@@ -82,7 +83,7 @@ if (worst) {
 }
 if (scenario === "attention" || worst) {
   activity.unshift({ at: iso(20), kind: "held-deletions", path: "", detail: "28 deletion(s) are waiting for your approval" } as never);
-  activity.splice(2, 0, { at: iso(40), kind: "error", path: "", detail: "Server unreachable" } as never);
+  activity.splice(2, 0, { at: iso(40), kind: "error", path: "", detail: scenario === "attention" ? LONG_ERROR : "Server unreachable" } as never);
 }
 
 const busy = scenario === "syncing";
@@ -116,7 +117,8 @@ const owner: any = {
   serverHealthSummary: () => connected ? ({ state: scenario === "attention" ? "degraded" : "online", message: scenario === "attention" ? "Waiting for a stable response" : "Reachable", serverVersionString: "33.0.9", nextCheckAt: iso(-45) }) : null,
   autoSyncSummary: () => ({
     enabled: connected, status: busy ? "syncing" : scenario === "attention" ? "attention" : "idle", pendingLocalChanges: 0,
-    lastSuccessAt: iso(42), lastRunAt: iso(42), nextRunAt: iso(-30), nextRemotePollAt: iso(-30), lastError: null
+    lastSuccessAt: iso(42), lastRunAt: iso(42), nextRunAt: iso(-30), nextRemotePollAt: iso(-30), consecutiveFailures: scenario === "attention" ? 3 : 0,
+    lastError: scenario === "attention" ? LONG_ERROR : null
   }),
   currentSyncPlan: () => connected ? plan : null,
   executionSummary: () => busy ? ({

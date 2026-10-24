@@ -4,6 +4,7 @@ import type NyraNextcloudSyncPlugin from "../main";
 import type { ActivityEntry, ActivityKind } from "../activity/activity-log";
 import { plural, relativePast } from "./format";
 import { createIcon, type IconName } from "./icons";
+import { appendErrorDetail } from "./settings-dom";
 
 const LABELS: Record<ActivityKind, string> = {
   uploaded: "Uploaded", downloaded: "Downloaded", merged: "Merged", moved: "Moved",
@@ -79,6 +80,21 @@ function renderRow(list: HTMLElement, entry: ActivityEntry): void {
   renderPath(path, entry.path || entry.detail || LABELS[entry.kind]);
   const label = entry.path && entry.detail ? `${LABELS[entry.kind]} · ${entry.detail}` : LABELS[entry.kind];
   row.createDiv({ cls: "nyra-nc-feed__meta", text: `${label} · ${relativePast(entry.at)}` });
+  if (!entry.detail) return;
+  // Tapping a row opens the full text (no hover tooltips on touch devices); errors start open.
+  const full = entry.path ? `${entry.path}
+${entry.detail}` : entry.detail;
+  row.tabIndex = 0; row.setAttribute("role", "button");
+  let detail: HTMLElement | null = null;
+  const toggle = (open: boolean): void => {
+    row.setAttribute("aria-expanded", String(open));
+    row.classList.toggle("is-open", open);
+    if (open && !detail) detail = appendErrorDetail(row, full);
+    if (detail) detail.hidden = !open;
+  };
+  row.addEventListener("click", (event) => { if ((event.target as HTMLElement).closest(".nyra-nc-detail")) return; toggle(!row.classList.contains("is-open")); });
+  row.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(!row.classList.contains("is-open")); } });
+  toggle(entry.kind === "error");
 }
 
 /** Folder part shrinks first; the file name stays readable, since names differ at the end. */

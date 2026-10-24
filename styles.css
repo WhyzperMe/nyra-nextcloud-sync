@@ -392,3 +392,20 @@
   .nyra-nc-settings .nyra-nc-tab { padding-block: 12px; }
   .nyra-nc-plan-row > summary, .nyra-nc-conflict-review > summary, .nyra-nc-diagnostics > summary, .nyra-nc-advanced > summary { min-height: 44px; }
 }
+
+/* ---- Error details: complete, selectable, scrollable (touch has no hover tooltips) ---- */
+.nyra-nc-detail { display: grid; gap: var(--size-2-3); min-width: 0; margin-top: var(--size-2-3); }
+.nyra-nc-detail[hidden] { display: none; }
+.nyra-nc-feed__row > .nyra-nc-detail { grid-column: 1 / -1; }
+.nyra-nc-detail__text { max-height: min(40vh, 320px); margin: 0; padding: var(--size-4-2) var(--size-4-3); overflow: auto; border: 1px solid var(--nyra-line); border-radius: var(--radius-m); background: var(--background-primary); color: var(--text-normal); font-family: var(--font-monospace); font-size: var(--font-ui-smaller); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; -webkit-overflow-scrolling: touch; }
+.nyra-nc-detail__copy { justify-self: start; }
+.nyra-nc-offscreen { position: fixed; top: 0; left: -9999px; opacity: 0; }
+.nyra-nc-feed__row[role="button"] { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.nyra-nc-feed__row[role="button"]:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.nyra-nc-feed__row.is-open .nyra-nc-feed__meta { white-space: normal; }
+.nyra-nc-card__detail { overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+.nyra-nc-alert__text { overflow-wrap: anywhere; }
+@media (pointer: coarse) {
+  .nyra-nc-feed__row[role="button"] { min-height: 44px; }
+  .nyra-nc-detail__copy { min-height: 40px; }
+}

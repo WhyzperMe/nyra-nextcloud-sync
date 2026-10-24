@@ -98,7 +98,9 @@ export class RemoteTransactionalMutator {
     await this.ensureDirectoryPath(this.options.webdavUserRoot, runtimePath);
     const probePath = `${runtimePath}/${randomId("etag-probe")} 📝 #? %.txt`;
     const probeUrl = appendWebdavPath(this.options.webdavUserRoot, probePath);
-    const movedPath = `${probePath}.moved`;
+    // Plain-ASCII destination: the guarded MOVE is about preconditions, not file names, so a
+    // client that mangles special characters in the Destination header must not block sync.
+    const movedPath = `${runtimePath}/${randomId("etag-probe-moved")}.txt`;
     const movedUrl = appendWebdavPath(this.options.webdavUserRoot, movedPath);
     const first = new TextEncoder().encode("nyra-conditional-probe-1\n");
     const forbidden = new TextEncoder().encode("nyra-conditional-probe-forbidden\n");
@@ -1042,7 +1044,7 @@ export class RemoteTransactionalMutator {
     if (response.status === 507) throw new Error(`Nextcloud reported insufficient storage during ${operation}.`);
     // Another client holds the file lock; nothing was committed, so a fresh inventory/plan resolves it.
     if (response.status === 423 && !allowed.includes(423)) throw new NyraError("sync-precondition-changed", `Nextcloud ${operation} was refused because the item is locked by another client.`);
-    if (!allowed.includes(response.status)) throw new Error(`Nextcloud ${operation} failed with HTTP ${response.status}.`);
+    if (!allowed.includes(response.status)) throw new Error(`Nextcloud ${operation} failed with HTTP ${response.status}${serverReason(response)}.`);
   }
 
   private headers(extra?: Record<string, string>): Record<string, string> {
@@ -1110,6 +1112,15 @@ export function distinctUploadMtimeMs(desiredMs: number | null | undefined, remo
 function mtimeHeader(mtimeMs: number | null | undefined): Record<string, string> {
   if (mtimeMs === null || mtimeMs === undefined || !Number.isFinite(mtimeMs) || mtimeMs < 0) return {};
   return { "X-OC-MTime": String(Math.floor(mtimeMs / 1000)) };
+}
+
+/** Short Sabre/Nextcloud explanation from an error body (its `<s:message>`), so a bare status code is never all the user sees. */
+export function serverReason(response: Pick<HttpResponse, "text">): string {
+  const text = typeof response.text === "string" ? response.text : "";
+  const raw = /<s:message>([\s\S]*?)<\/s:message>/i.exec(text)?.[1] ?? /<message>([\s\S]*?)<\/message>/i.exec(text)?.[1] ?? "";
+  const clean = raw.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  return ` (${clean.length > 200 ? `${clean.slice(0, 197)}…` : clean})`;
 }
 
 function sleep(ms: number): Promise<void> { return new Promise((resolve) => globalThis.setTimeout(resolve, ms)); }

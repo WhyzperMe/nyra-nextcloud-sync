@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.3
+
+- **Errors you can read in full on iPad and phone:** sync errors are no longer cut off with "…". The Overview shows a **Last sync failed** card with the complete message in a scrollable, selectable box, a **Copy** button and **Try again**. Rows in the activity list open on tap to show the full text (errors start open), and the Auto-sync status shows the real error instead of just "Attention". Messages in the box wrap and can be copied, so they can be pasted into a bug report.
+- **Server reasons instead of bare status codes:** when Nextcloud refuses a request, the message now includes its explanation (for example `HTTP 400 (Destination header …)`). Stored sync errors keep up to 800 characters instead of 180.
+- **Safer connection check on iPad:** the guarded-MOVE step of the server-safety check now moves its probe file to a plain-ASCII name, so clients that mangle special characters in the `Destination` header can no longer block syncing.
+
 ## 0.18.2
 
 - **Fixes "Remote writes are paused: Nextcloud did not advance the ETag":** Nextcloud only changes a file's ETag when its stored modification time changes, so rewriting a file with the same source mtime kept the old ETag even though the bytes changed. The server-safety check no longer pauses on this. Every conditional update now carries a modification time whose second differs from the remote file's current one, so the ETag reliably advances and a concurrent same-second edit from another device is still detected. The safety check tests exactly that behavior and still pauses when a server truly keeps the ETag.

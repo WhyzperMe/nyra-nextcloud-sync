@@ -422,5 +422,5 @@ function clamp(value: number, min: number, max: number): number {
 function iso(ms: number): string { return new Date(ms).toISOString(); }
 function concise(error: unknown): string {
   const message = errorMessage(error);
-  return message.length > 180 ? `${message.slice(0, 177)}…` : message;
+  return message.length > 800 ? `${message.slice(0, 797)}…` : message;
 }

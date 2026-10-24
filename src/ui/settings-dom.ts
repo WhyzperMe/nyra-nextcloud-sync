@@ -118,3 +118,32 @@ export function metric(label: string, value: number, tone: Tone): HTMLElement {
 }
 
 export type Tone = "ok" | "warn" | "error" | "neutral";
+
+/** Copies text with the async clipboard API, falling back to a hidden textarea for webviews that lack it. */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* fall through to the legacy path */ }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text; area.setAttribute("readonly", ""); area.className = "nyra-nc-offscreen";
+    document.body.appendChild(area); area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    return ok;
+  } catch { return false; }
+}
+
+/** The complete message, wrapped, selectable and scrollable, with a Copy button — nothing is ever cut off. */
+export function appendErrorDetail(parent: HTMLElement, text: string): HTMLElement {
+  const wrap = document.createElement("div"); wrap.className = "nyra-nc-detail";
+  const body = document.createElement("pre"); body.className = "nyra-nc-detail__text"; body.textContent = text; body.tabIndex = 0;
+  const copy = document.createElement("button"); copy.type = "button"; copy.className = "nyra-nc-detail__copy"; copy.textContent = "Copy";
+  copy.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void copyText(text).then((ok) => { copy.textContent = ok ? "Copied" : "Press and hold the text to copy"; globalThis.setTimeout(() => { copy.textContent = "Copy"; }, 2000); });
+  });
+  wrap.append(body, copy);
+  parent.appendChild(wrap);
+  return wrap;
+}

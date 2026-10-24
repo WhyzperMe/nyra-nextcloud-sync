@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Logger } from "../src/diagnostics/logger";
 import type { HttpRequest, HttpTransport } from "../src/network/http-client";
-import { RemoteTransactionalMutator, distinctUploadMtimeMs } from "../src/execution/remote-mutator";
+import { RemoteTransactionalMutator, distinctUploadMtimeMs, serverReason } from "../src/execution/remote-mutator";
 import { TransferJournalStore } from "../src/transfer/journal";
 import type { TransferJournalPayload } from "../src/transfer/types";
 import { FakeNextcloudDav } from "./helpers/fake-nextcloud";
@@ -76,6 +76,34 @@ describe("live conditional-write capability fence", () => {
     const updated = await mutator.uploadUpdate(url, "note.md", new TextEncoder().encode("bbbb").buffer, created.remote.fileId, created.remote.etag, sourceMtimeMs);
     expect(updated.remote.etag).not.toBe(created.remote.etag);
     expect(updated.remote.fileId).toBe(created.remote.fileId);
+  });
+
+  it("explains server refusals with the Sabre message instead of a bare status code", async () => {
+    const dav = new FakeNextcloudDav(serverUrl, userId);
+    const transport: HttpTransport = { request: async (input) => {
+      if (input.method === "MOVE" && input.headers?.["If-Match"] && !input.url.includes("etag-probe-moved")) {
+        const reply = await dav.request(input);
+        if (reply.status !== 412) return { ...reply, status: 400, text: "<?xml version=\"1.0\"?><d:error xmlns:d=\"DAV:\" xmlns:s=\"http://sabredav.org/ns\"><s:exception>Sabre\DAV\Exception\BadRequest</s:exception><s:message>Destination &lt;bad&gt; header</s:message></d:error>" };
+        return reply;
+      }
+      return await dav.request(input);
+    } };
+    await expect(makeMutator(transport).verifyConditionalWrites()).rejects.toThrow("move conditional-write probe failed with HTTP 400 (Destination <bad> header).");
+    expect(serverReason({ text: "" })).toBe("");
+    expect(serverReason({ text: `<s:message>${"x".repeat(500)}</s:message>` }).length).toBeLessThan(230);
+  });
+
+  it("moves the probe to a plain-ASCII destination", async () => {
+    const dav = new FakeNextcloudDav(serverUrl, userId);
+    const destinations: string[] = [];
+    const transport: HttpTransport = { request: async (input) => {
+      if (input.method === "MOVE") destinations.push(input.headers?.Destination ?? "");
+      return await dav.request(input);
+    } };
+    await makeMutator(transport).verifyConditionalWrites();
+    expect(destinations.length).toBeGreaterThan(0);
+    expect(destinations.every((destination) => /^[ -~]+$/.test(destination) && !/%F0|%3F|%23/i.test(destination))).toBe(true);
+    expect(dav.fileUrls()).toEqual([]);
   });
 
   it("only moves an upload mtime when it would collide with the stored remote second", () => {
