@@ -30,6 +30,8 @@ export interface SyncCyclePort {
   buildPlan(): Promise<SyncPlan>;
   autoMergeEnabled(): boolean;
   applyPlan(allowDeletes: boolean): Promise<ExecutionReport>;
+  /** Resolves the conflicts the autonomous policy covers; returns how many it resolved. Optional. */
+  autoResolveConflicts?(): Promise<number>;
   /** Mirrors folders (including empty ones) from fresh inventories; returns the operations performed. */
   syncFolders(allowDeletes: boolean): Promise<number>;
 }
@@ -105,12 +107,18 @@ export class SyncCycleRunner {
       bytesProcessed = report.bytesProcessed;
       reviewCount = Math.max(reviewItems, report.blocked);
     }
+    // Conflicts left after planning and merging are settled by the autonomous policy; the next cycle verifies the result.
+    let resolvedConflicts = 0;
+    if (reviewCount > 0 && this.port.autoResolveConflicts) {
+      resolvedConflicts = await this.port.autoResolveConflicts();
+      reviewCount = Math.max(0, reviewCount - resolvedConflicts);
+    }
     const folderOperations = await this.port.syncFolders(allowDeletes);
-    const executed = completedSteps + folderOperations > 0;
+    const executed = completedSteps + folderOperations + resolvedConflicts > 0;
     return {
       changed: executed || (executable === 0 && plan.summary.noop !== plan.summary.total),
       executed,
-      completedSteps: completedSteps + folderOperations,
+      completedSteps: completedSteps + folderOperations + resolvedConflicts,
       blockedSteps,
       reviewItems: reviewCount,
       bytesProcessed

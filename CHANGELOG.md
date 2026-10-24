@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.19.0
+
+**Conflicts resolve themselves.** New setting **Resolve conflicts automatically** (Sync → on by default). Nothing is ever discarded: whatever does not stay at the path is first saved next to it.
+
+- **Two versions of one file (edited on two devices, or created on both):** the newer version stays; the other one is saved as `name (Nyra conflict LOCAL|REMOTE …)` and syncs like any note. Times closer than two seconds, or an unknown time, are decided by content hash, so every device reaches the same result. Text edits that do not overlap are still merged first.
+- **Deleted on one side, changed on the other:** the change wins and the file is restored (downloaded or uploaded again) with a verified new baseline.
+- **Renamed differently on both sides:** the Nextcloud name wins; the local file is moved to it (refused if that path is occupied).
+- **"…collides with another replica's path or required parent directory":** this was bookkeeping, not your files. Nyra now re-pairs the durable records of such paths by their exact path (local with Nextcloud) before planning, never touches a file, never infers a deletion and clears stale tombstones. Genuine letter-case/Unicode aliases of two different files are left for review.
+- The activity list shows **Conflict resolved** with the reason; "Review both versions" now only lists what Nyra could not settle on its own. Switch the setting off to restore the previous fully manual behaviour.
+- 14 new tests cover the repair of the screenshot case, the decision rules (including identical decisions on every device), restore and rename plans, a restore through the real executor and the cycle hook.
+
 ## 0.18.6
 
 - **Cleans up the leftover `etag-probe…` files that other sync clients complained about** ("file names containing ? are not supported", for example in the Nextcloud desktop client). Older versions created these short-lived connection-check files with an icon and `# ? %` in the name and, on some clients, could not delete them again, so they piled up in `.nyra-nextcloud-sync-runtime`. Before each safety check Nyra now deletes stale `etag-probe*` files (small, untouched for ten minutes, removed with their own ETag) in that folder; young probes of another device and every other file are left alone.

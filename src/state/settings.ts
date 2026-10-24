@@ -56,6 +56,8 @@ export interface PluginSettings {
   fastRemoteCheck: boolean;
   /** Attempt only conflict-free bounded BASE/LOCAL/REMOTE merges for Markdown/plain text. */
   autoMergeText: boolean;
+  /** Resolve conflicts on their own (newer wins, the other version is kept as a conflict copy; changes beat deletions). */
+  autoResolveConflicts: boolean;
   /** Maximum bytes per BASE/LOCAL/REMOTE version considered for automatic text merge. */
   autoMergeMaxMiB: number;
   serverHealthCheckSeconds: number;
@@ -89,6 +91,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   maxFileSizeMiB: 0,
   fastRemoteCheck: true,
   autoMergeText: true,
+  autoResolveConflicts: true,
   autoMergeMaxMiB: 2,
   serverHealthCheckSeconds: 60,
   connectionState: "disconnected",
@@ -142,6 +145,7 @@ export function normalizeSettings(raw: unknown): PluginSettings {
     // The bounded conflict-free merge is on by default. Any saved
     // boolean remains authoritative, including an explicit legacy opt-out.
     autoMergeText: upgrade || typeof raw.autoMergeText !== "boolean" ? inferLegacyAutoMergeDefault() : raw.autoMergeText,
+    autoResolveConflicts: typeof raw.autoResolveConflicts === "boolean" ? raw.autoResolveConflicts : DEFAULT_SETTINGS.autoResolveConflicts,
     autoMergeMaxMiB: safeInteger(raw.autoMergeMaxMiB, 1, 4, DEFAULT_SETTINGS.autoMergeMaxMiB),
     serverHealthCheckSeconds: safeInteger(raw.serverHealthCheckSeconds, 30, 900, DEFAULT_SETTINGS.serverHealthCheckSeconds),
     connectionState: validConnectionState(raw.connectionState) ? raw.connectionState : DEFAULT_SETTINGS.connectionState,

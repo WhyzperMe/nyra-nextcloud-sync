@@ -223,7 +223,9 @@ export class NyraNextcloudSyncSettingTab extends PluginSettingTab {
     renderPendingDeletions(panel, this.owner, () => this.display());
     const conflicts = this.owner.syncConflictReviews();
     if (conflicts.length > 0) {
-      const section = createSection(panel, "Review both versions", "Nyra has not chosen a winner. Compare this device, the common ancestor and Nextcloud; timestamps are metadata only and never decide which content wins.");
+      const section = createSection(panel, "Review both versions", this.owner.settings.autoResolveConflicts
+        ? "Nyra could not settle these on its own. Compare this device, the common ancestor and Nextcloud, then choose; the version you do not keep is saved next to the file."
+        : "Automatic conflict resolution is off, so Nyra has not chosen a winner. Compare this device, the common ancestor and Nextcloud; timestamps are metadata only and never decide which content wins.");
       for (const conflict of conflicts.slice(0, 30)) section.appendChild(conflictReview(conflict, this.owner, () => this.display()));
     }
   }
@@ -322,6 +324,13 @@ export class NyraNextcloudSyncSettingTab extends PluginSettingTab {
       .setDesc("Automatically merges only bounded, non-overlapping BASE/LOCAL/REMOTE edits in Markdown or plain text. Overlaps stay blocked; Nyra never writes conflict markers automatically.")
       .addToggle((toggle) => toggle.setValue(this.owner.settings.autoMergeText).setDisabled(busy).onChange((value) => {
         return this.updateAndDisplay((settings) => { settings.autoMergeText = value; });
+      }));
+
+    new Setting(section)
+      .setName("Resolve conflicts automatically")
+      .setDesc("When two devices changed the same file, the newer version stays and the other one is kept next to it as a conflict copy. A change always beats a deletion, and a duplicate path is re-paired without touching your files. Nothing is ever discarded.")
+      .addToggle((toggle) => toggle.setValue(this.owner.settings.autoResolveConflicts).setDisabled(busy).onChange((value) => {
+        return this.updateAndDisplay((settings) => { settings.autoResolveConflicts = value; });
       }));
 
     new Setting(section)

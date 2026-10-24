@@ -10,13 +10,13 @@ const LABELS: Record<ActivityKind, string> = {
   uploaded: "Uploaded", downloaded: "Downloaded", merged: "Merged", moved: "Moved",
   "deleted-here": "Deleted here", "deleted-on-server": "Deleted on Nextcloud",
   "folder-created": "Folder created", "folder-deleted": "Folder deleted",
-  "needs-review": "Needs review", "held-deletions": "Deletions held", skipped: "Skipped", error: "Error"
+  "needs-review": "Needs review", "held-deletions": "Deletions held", skipped: "Skipped", error: "Error", "auto-resolved": "Conflict resolved"
 };
 
 const ICONS: Record<ActivityKind, IconName> = {
   uploaded: "arrow-up", downloaded: "arrow-down", merged: "merge", moved: "arrow-right",
   "deleted-here": "trash", "deleted-on-server": "trash", "folder-created": "folder-plus", "folder-deleted": "trash",
-  "needs-review": "alert", "held-deletions": "shield", skipped: "info", error: "x-circle"
+  "needs-review": "alert", "held-deletions": "shield", skipped: "info", error: "x-circle", "auto-resolved": "merge"
 };
 
 const TONES: Partial<Record<ActivityKind, "warn" | "error" | "danger">> = {

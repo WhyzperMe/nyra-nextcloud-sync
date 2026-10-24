@@ -39,6 +39,8 @@ import { LocalInventoryWatcher } from "./local/watcher";
 import { HttpClient } from "./network/http-client";
 import { ConnectionVerifier } from "./nextcloud/verification";
 import { SyncPlannerService } from "./planner/service";
+import { decideAutoResolution, makeAutoResolutionPlan } from "./planner/auto-resolution";
+import { applyCollisionRepair, planCollisionRepair } from "./planner/collision-repair";
 import { assertConflictChoiceEligible, makeExplicitChoicePlan, makeSafeMergeRetryPlan, type ConflictChoice } from "./planner/conflict-resolution";
 import type { SyncPlan, SyncPlannerRuntimeSummary } from "./planner/types";
 import { appendWebdavPath } from "./remote/path";
@@ -274,6 +276,7 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
         buildPlan: async () => await this.buildSyncPlanInternal(),
         autoMergeEnabled: () => this.settings.autoMergeText,
         applyPlan: async (allowDeletes) => await this.applyCurrentSyncPlanInternal(allowDeletes),
+        autoResolveConflicts: async () => await this.autoResolveConflictsInternal(),
         syncFolders: async (allowDeletes) => await this.syncFoldersInternal(allowDeletes)
       });
 
@@ -507,6 +510,17 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
 
     this.refreshStatusBar();
     try {
+      return await this.resolveConflictCore(entryId, choice);
+    } finally {
+      releaseOperation();
+      this.refreshStatusBar();
+    }
+  }
+
+  /** The conflict resolution itself; the caller owns the operation guard (a manual choice or the automatic cycle). */
+  private async resolveConflictCore(entryId: string, choice: ConflictChoice | "keep-both"): Promise<ExecutionReport | null> {
+    if (!this.localMutator || !this.durableState) throw new Error(this.stateInitializationError ?? "Conflict recovery is unavailable.");
+    {
       await this.scanLocalVaultInternal("conflict-review-local");
       const remoteScan = await this.scanRemoteVaultInternal();
       if (remoteScan.scan.trust !== "authoritative" || !this.localFactsComplete) throw new Error("Conflict choices need complete LOCAL and REMOTE inventories.");
@@ -560,10 +574,59 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
       if (report.completed > 0 && report.blocked === 0 && report.failed === 0) this.failedMergeReviews.delete(entryId);
       this.autoSync?.noteLocalActivity();
       return report;
-    } finally {
-      releaseOperation();
-      this.refreshStatusBar();
     }
+  }
+
+  /**
+   * Resolves every conflict that the autonomous policy covers (see planner/auto-resolution): newer content wins
+   * with the other version kept as a conflict copy, changes beat deletions, the Nextcloud name wins a rename
+   * clash. Runs inside the sync cycle, so it uses the cycle's operation guard. Returns how many were resolved.
+   */
+  private async autoResolveConflictsInternal(): Promise<number> {
+    if (!this.settings.autoResolveConflicts || !this.durableState || !this.localMutator) return 0;
+    if (!this.localFactsComplete || !this.remoteFactsComplete) return 0;
+    // The plan used for this cycle predates the execution; decide on fresh facts.
+    await this.buildSyncPlanInternal();
+    const reviews = this.syncConflictReviews();
+    if (reviews.length === 0) return 0;
+    let resolved = 0;
+    for (const review of reviews.slice(0, 25)) {
+      try {
+        // Each resolution changes durable state; decide the next one on a plan that matches it.
+        const plan = this.currentSyncPlan() ?? await this.buildSyncPlanInternal();
+        const state = this.durableState.getState();
+        const item = plan.items.find((candidate) => candidate.entryId === review.entryId);
+        const record = state.files[review.entryId];
+        if (!item || !record) continue;
+        const decision = decideAutoResolution(item, record);
+        if (!decision) continue;
+        if (decision.kind === "keep-local" || decision.kind === "keep-remote") {
+          await this.resolveConflictCore(review.entryId, decision.kind);
+        } else {
+          const fresh = await this.buildSyncPlanInternal();
+          const current = fresh.items.find((candidate) => candidate.entryId === review.entryId);
+          const currentRecord = this.durableState.getState().files[review.entryId];
+          if (!current || !currentRecord || decideAutoResolution(current, currentRecord)?.kind !== decision.kind) continue;
+          await this.applyCurrentSyncPlanInternal(false, "bidirectional", await makeAutoResolutionPlan(fresh, review.entryId, decision));
+        }
+        this.logger.info("conflict.auto-resolved", { kind: decision.kind, classification: item.classification });
+        void this.activity?.add([{ at: new Date().toISOString(), kind: "auto-resolved", path: review.path, detail: decision.reason }]);
+        resolved += 1;
+      } catch (error) {
+        this.logger.warn("conflict.auto-resolve-failed", { error: errorMessage(error) });
+      }
+    }
+    if (resolved > 0) this.autoSync?.noteLocalActivity();
+    return resolved;
+  }
+
+  /** Re-pairs durable records that claim the same path; files are never touched (see planner/collision-repair). */
+  private async repairPathCollisionsInternal(): Promise<void> {
+    if (!this.durableState) return;
+    const repair = planCollisionRepair(this.durableState.getState(), (path) => this.pathPolicy?.isIncluded(path) ?? true);
+    if (!repair || repair.groups === 0) return;
+    await this.durableState.transact("path-collision-repair", (tx, base) => applyCollisionRepair(tx, base, repair));
+    this.logger.info("planner.path-collisions-repaired", { groups: repair.groups, removedRecords: repair.removals.length, unrepairable: repair.unrepairable });
   }
 
   async updateSettings(mutator: (settings: PluginSettings) => void): Promise<void> {
@@ -728,6 +791,7 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
     if (this.executionActive) throw new Error("A transactional sync execution is currently active.");
     if (!this.planner) throw new Error(this.stateInitializationError ?? "Sync planner is unavailable.");
     await this.assertConvergenceHealthy("planning");
+    if (this.settings.autoResolveConflicts) await this.repairPathCollisionsInternal();
     const scope = this.syncScopeKey(this.settings);
     const plan = await this.planner.buildPlan();
     this.refreshDeletionHold(plan);

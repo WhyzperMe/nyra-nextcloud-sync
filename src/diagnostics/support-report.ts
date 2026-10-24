@@ -52,6 +52,7 @@ export function createRedactedSupportReport(input: RedactedSupportReportInput): 
       remotePollBaseMs: input.settings.autoSyncRemotePollSeconds * 1000,
       automaticDeletionEnabled: input.settings.autoSyncAllowDeletes,
       safeTextMergeEnabled: input.settings.autoMergeText,
+      autoResolveConflicts: input.settings.autoResolveConflicts,
       safeTextMergeMaxMiB: input.settings.autoMergeMaxMiB,
       syncObsidianConfig: input.settings.syncObsidianConfig,
       remoteRootSegmentCount: pathSegmentCount(input.settings.remoteRootPath),

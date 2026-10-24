@@ -1,6 +1,6 @@
 # Nyra Nextcloud Sync
 
-Bidirectional Obsidian ↔ Nextcloud sync with verified writes, safe merges and conservative conflict handling. Works on desktop and on iPad/iPhone.
+Bidirectional Obsidian ↔ Nextcloud sync with verified writes, safe merges and autonomous, loss-free conflict resolution. Works on desktop and on iPad/iPhone.
 
 | | |
 | --- | --- |
@@ -8,7 +8,7 @@ Bidirectional Obsidian ↔ Nextcloud sync with verified writes, safe merges and 
 | **Everything is mirrored** | Notes, attachments, PDFs, images, any file type, nested folders, **empty folders**, renames |
 | **Deletions** | Deleting a file or folder deletes it on the other side and it does not come back. A **mass-deletion guard** holds large deletions for your approval; **Restore deleted files** brings them back from retained copies or the Nextcloud trash bin |
 | **History** | Browse, compare and restore **previous versions** of a note from Nextcloud |
-| **Conflicts** | Non-overlapping text edits are merged automatically. Everything else is kept for review with a **line diff** and explicit Keep local / remote / both. Nothing is silently overwritten |
+| **Conflicts** | Non-overlapping text edits are merged automatically. For everything else Nyra decides on its own and never discards data: the newer version stays, the other is saved next to it as a conflict copy; a change beats a deletion; duplicate paths are re-paired. Only genuine ambiguities are left for you, with a **line diff** and Keep local / remote / both |
 | **Scope** | Exclude files and folders with simple patterns, sync only chosen folders, cap file size, pause auto-sync |
 | **Mobile** | No Node/Electron APIs. Whole-file memory limits are enforced (32 MiB on mobile, 128 MiB on desktop); larger files are skipped on that device, never deleted or blocking |
 | **Activity** | The settings list what the last syncs did, what is waiting for approval and what was skipped |
@@ -27,7 +27,7 @@ Use the same remote folder on every device. On a new device, run **Download vaul
 
 - Edit normally. Auto-sync coalesces edits and retries after outages.
 - **Sync now** (command palette or settings) runs a cycle immediately.
-- Conflicts offer **Keep local**, **Keep remote**, **Keep both** or **Retry safe merge**.
+- Conflicts are settled automatically (setting **Resolve conflicts automatically**, on by default). What remains offers **Keep local**, **Keep remote**, **Keep both** or **Retry safe merge**.
 - **Automatic deletes** is on by default. Switch it off in settings if you only want additions and edits to propagate. Whenever one sync would delete more than **Ask before deleting more than** items (default 20) or most of the vault, Nyra waits for your approval (settings → Activity, or the command **Approve pending deletions**).
 - **Restore deleted files…** and **Show previous versions of the current note** are in the command palette.
 - The **Files** tab lets you tick or untick any file or folder in a tree view (this device and Nextcloud together); unticked items are left alone on both sides. Under **Rules and limits** you can also exclude patterns (`*.tmp`, `Private/`, `node_modules`, `/Inbox`, `Attachments/**/raw`), restrict sync to folders, skip files above a size and pause auto-sync.

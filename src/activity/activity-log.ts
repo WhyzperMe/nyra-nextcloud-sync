@@ -6,7 +6,7 @@ export type ActivityKind =
   | "uploaded" | "downloaded" | "merged" | "moved"
   | "deleted-here" | "deleted-on-server"
   | "folder-created" | "folder-deleted"
-  | "needs-review" | "held-deletions" | "skipped" | "error";
+  | "needs-review" | "held-deletions" | "skipped" | "error" | "auto-resolved";
 
 export interface ActivityEntry {
   at: string;
@@ -17,7 +17,7 @@ export interface ActivityEntry {
 }
 
 const MAX_ENTRIES = 300;
-const KINDS: readonly string[] = ["uploaded", "downloaded", "merged", "moved", "deleted-here", "deleted-on-server", "folder-created", "folder-deleted", "needs-review", "held-deletions", "skipped", "error"];
+const KINDS: readonly string[] = ["uploaded", "downloaded", "merged", "moved", "deleted-here", "deleted-on-server", "folder-created", "folder-deleted", "needs-review", "held-deletions", "skipped", "error", "auto-resolved"];
 
 /** Chronological record of what sync did, kept in memory for the UI and persisted for the next session. */
 export class ActivityLog {
