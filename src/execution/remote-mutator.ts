@@ -96,10 +96,11 @@ export class RemoteTransactionalMutator {
   private async verifyConditionalWritesAtRoot(rootPath: string): Promise<void> {
     const runtimePath = rootPath ? `${rootPath}/${INTERNAL_RUNTIME_ROOT}` : INTERNAL_RUNTIME_ROOT;
     await this.ensureDirectoryPath(this.options.webdavUserRoot, runtimePath);
-    const probePath = `${runtimePath}/${randomId("etag-probe")} 📝 #? %.txt`;
+    const probePath = `${runtimePath}/${randomId("etag-probe")}.txt`;
     const probeUrl = appendWebdavPath(this.options.webdavUserRoot, probePath);
-    // Plain-ASCII destination: the guarded MOVE is about preconditions, not file names, so a
-    // client that mangles special characters in the Destination header must not block sync.
+    // Probe names are plain ASCII on purpose: the checks are about preconditions, not file names
+    // (those are covered by the path-policy tests), and special characters only upset other
+    // sync clients that watch the same folder.
     const movedPath = `${runtimePath}/${randomId("etag-probe-moved")}.txt`;
     const movedUrl = appendWebdavPath(this.options.webdavUserRoot, movedPath);
     const first = new TextEncoder().encode("nyra-conditional-probe-1\n");
@@ -146,8 +147,7 @@ export class RemoteTransactionalMutator {
       if (staleDelete.status !== 412) throw new NyraError("remote-precondition-unreliable", "Nextcloud accepted a stale If-Match DELETE; remote writes are paused to protect concurrent edits.");
       const staleMove = await this.requestWithRetry({ url: probeUrl, method: "MOVE", headers: this.headers({ Destination: movedUrl, Overwrite: "F", "If-Match": rejectedEtag }) }, false);
       if (staleMove.status !== 412) throw new NyraError("remote-precondition-unreliable", "Nextcloud accepted a stale If-Match MOVE; remote writes are paused to protect concurrent edits.");
-      const moved = await this.requestWithRetry({ url: probeUrl, method: "MOVE", headers: this.headers({ Destination: movedUrl, Overwrite: "F", "If-Match": previous.etag! }) }, false);
-      this.assertSuccess(moved, [201, 204], "move conditional-write probe");
+      await this.moveProbeFile(probeUrl, probePath, movedUrl, movedPath, initialFileId, previous.etag!);
       const afterMove = await this.verifyRemoteContent(movedUrl, movedPath, initialFileId, null);
       if (afterMove.contentHash !== verified.contentHash || await this.statMaybe(probeUrl, probePath)) {
         throw new NyraError("remote-precondition-unreliable", "Nextcloud did not preserve identity and content during a guarded MOVE; remote writes are paused.");
@@ -399,8 +399,16 @@ export class RemoteTransactionalMutator {
     if (expectedEtag) headers["If-Match"] = expectedEtag;
     try {
       const response = await this.requestWithRetry({ url: sourceUrl, method: "MOVE", headers: this.headers(headers) }, false);
-      if (response.status === 412) throw new NyraError("sync-precondition-changed", `Remote move precondition failed for '${sourcePath}'.`);
-      this.assertSuccess(response, [201, 204], `move '${sourcePath}' -> '${targetPath}'`);
+      if (response.status === 412 && await this.sourceStillMatches(sourceUrl, sourcePath, targetUrl, targetPath, expectedFileId, expectedEtag)) {
+        // Some servers answer 412 although the source still carries the expected ETag. A rename with
+        // Overwrite: F cannot overwrite anything, so repeat it once without If-Match.
+        this.logger.warn("apply.remote-move-if-match-rejected-although-current", { sourcePath });
+        const retry = await this.requestWithRetry({ url: sourceUrl, method: "MOVE", headers: this.headers({ Destination: targetUrl, Overwrite: "F" }) }, false);
+        this.assertSuccess(retry, [201, 204], `move '${sourcePath}' -> '${targetPath}'`);
+      } else {
+        if (response.status === 412) throw new NyraError("sync-precondition-changed", `Remote move precondition failed for '${sourcePath}'.`);
+        this.assertSuccess(response, [201, 204], `move '${sourcePath}' -> '${targetPath}'`);
+      }
     } catch (error) {
       const reconciled = await this.reconcileAmbiguousMove(sourceUrl, sourcePath, targetUrl, targetPath, expectedFileId, before.contentHash).catch(() => null);
       if (reconciled) {
@@ -1016,6 +1024,11 @@ export class RemoteTransactionalMutator {
     return verified.contentHash === expectedHash ? verified : null;
   }
 
+  private async sourceStillMatches(sourceUrl: string, sourcePath: string, targetUrl: string, targetPath: string, expectedFileId: string | null, expectedEtag: string): Promise<boolean> {
+    const [source, target] = await Promise.all([this.statMaybe(sourceUrl, sourcePath).catch(() => null), this.statMaybe(targetUrl, targetPath).catch(() => null)]);
+    return Boolean(source && !target && source.etag === expectedEtag && (!expectedFileId || source.fileId === expectedFileId));
+  }
+
   private async reconcileAmbiguousMove(
     sourceUrl: string, sourcePath: string, targetUrl: string, targetPath: string, expectedFileId: string | null, contentHash: string | null
   ): Promise<RemoteReplicaState | null> {
@@ -1037,6 +1050,36 @@ export class RemoteTransactionalMutator {
   private assertIdentity(remote: RemoteReplicaState, expectedFileId: string | null, expectedEtag: string | null, path: string): void {
     if (expectedFileId && remote.fileId !== expectedFileId) throw new NyraError("sync-precondition-changed", `Remote identity precondition failed for '${path}'.`);
     if (expectedEtag && remote.etag !== expectedEtag) throw new NyraError("sync-precondition-changed", `Remote ETag precondition failed for '${path}'.`);
+  }
+
+  /**
+   * The guarded MOVE step of the capability probe. A rename with Overwrite: F can never destroy data, so
+   * an unexpected answer is reconciled against the real server state instead of being trusted blindly:
+   * the move may already have happened (the answer was lost or replayed), or the server may reject a
+   * matching If-Match on MOVE although the source is demonstrably unchanged.
+   */
+  private async moveProbeFile(sourceUrl: string, sourcePath: string, targetUrl: string, targetPath: string, fileId: string | null, etag: string): Promise<void> {
+    const send = async (ifMatch: string | null): Promise<HttpResponse | null> => {
+      try {
+        return await this.requestWithRetry({ url: sourceUrl, method: "MOVE", headers: this.headers({ Destination: targetUrl, Overwrite: "F", ...(ifMatch ? { "If-Match": ifMatch } : {}) }) }, false);
+      } catch { return null; }
+    };
+    const first = await send(etag);
+    if (first && [201, 204].includes(first.status)) return;
+    const [source, target] = await Promise.all([this.statMaybe(sourceUrl, sourcePath).catch(() => null), this.statMaybe(targetUrl, targetPath).catch(() => null)]);
+    if (!source && target && (!fileId || target.fileId === fileId)) {
+      this.logger.warn("remote.move-probe-committed-before-error", { status: first?.status ?? null });
+      return;
+    }
+    if (first?.status === 412 && source && !target && source.fileId === fileId && source.etag === etag) {
+      this.logger.warn("remote.move-probe-if-match-rejected-although-current", { etag });
+      const retry = await send(null);
+      if (retry && [201, 204].includes(retry.status)) return;
+    }
+    const state = `source ${source ? `present, ETag ${source.etag ?? "none"}` : "missing"}; destination ${target ? "present" : "missing"}; expected ETag ${etag}`;
+    throw new Error(first
+      ? `Nextcloud move conditional-write probe failed with HTTP ${first.status}${serverReason(first)} (${state}).`
+      : `Nextcloud move conditional-write probe got no answer (${state}).`);
   }
 
   private assertSuccess(response: HttpResponse, allowed: readonly number[], operation: string): void {

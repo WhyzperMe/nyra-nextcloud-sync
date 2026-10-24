@@ -1,6 +1,6 @@
 {
   "name": "nyra-nextcloud-sync",
-  "version": "0.18.3",
+  "version": "0.18.4",
   "description": "Safety-first Nextcloud sync for Obsidian: instant sync, folders and deletions, mass-delete protection, restore and version history, built for desktop and iPad.",
   "main": "main.js",
   "scripts": {

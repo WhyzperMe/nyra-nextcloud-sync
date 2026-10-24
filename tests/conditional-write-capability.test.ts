@@ -80,30 +80,78 @@ describe("live conditional-write capability fence", () => {
 
   it("explains server refusals with the Sabre message instead of a bare status code", async () => {
     const dav = new FakeNextcloudDav(serverUrl, userId);
+    let moves = 0;
     const transport: HttpTransport = { request: async (input) => {
-      if (input.method === "MOVE" && input.headers?.["If-Match"] && !input.url.includes("etag-probe-moved")) {
-        const reply = await dav.request(input);
-        if (reply.status !== 412) return { ...reply, status: 400, text: "<?xml version=\"1.0\"?><d:error xmlns:d=\"DAV:\" xmlns:s=\"http://sabredav.org/ns\"><s:exception>Sabre\DAV\Exception\BadRequest</s:exception><s:message>Destination &lt;bad&gt; header</s:message></d:error>" };
-        return reply;
+      if (input.method === "MOVE" && ++moves === 2) {
+        return { status: 400, headers: {}, arrayBuffer: new ArrayBuffer(0), json: () => ({}), text: "<?xml version=\"1.0\"?><d:error xmlns:d=\"DAV:\" xmlns:s=\"http://sabredav.org/ns\"><s:exception>Sabre\DAV\Exception\BadRequest</s:exception><s:message>Destination &lt;bad&gt; header</s:message></d:error>" };
       }
       return await dav.request(input);
     } };
-    await expect(makeMutator(transport).verifyConditionalWrites()).rejects.toThrow("move conditional-write probe failed with HTTP 400 (Destination <bad> header).");
+    const failure = await makeMutator(transport).verifyConditionalWrites().then(() => "", (error: unknown) => (error as Error).message);
+    expect(failure).toContain("move conditional-write probe failed with HTTP 400 (Destination <bad> header)");
+    expect(failure).toContain("source present");
+    expect(failure).toContain("destination missing");
     expect(serverReason({ text: "" })).toBe("");
     expect(serverReason({ text: `<s:message>${"x".repeat(500)}</s:message>` }).length).toBeLessThan(230);
+    expect(dav.fileUrls()).toEqual([]);
   });
 
-  it("moves the probe to a plain-ASCII destination", async () => {
+  it("names its probe files in plain ASCII without icons or URL-special characters", async () => {
     const dav = new FakeNextcloudDav(serverUrl, userId);
-    const destinations: string[] = [];
+    const urls: string[] = [];
+    const transport: HttpTransport = { request: async (input) => { urls.push(input.url, input.headers?.Destination ?? ""); return await dav.request(input); } };
+    await makeMutator(transport).verifyConditionalWrites("Obsidian");
+    const probeUrls = urls.filter((url) => url.includes("etag-probe"));
+    expect(probeUrls.length).toBeGreaterThan(0);
+    for (const url of probeUrls) expect(decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "")).toMatch(/^etag-probe[a-z0-9_-]*[.]txt$/);
+  });
+
+  it("accepts a guarded MOVE whose answer was lost after the server had already moved the file", async () => {
+    const dav = new FakeNextcloudDav(serverUrl, userId);
+    let moves = 0;
     const transport: HttpTransport = { request: async (input) => {
-      if (input.method === "MOVE") destinations.push(input.headers?.Destination ?? "");
+      const reply = await dav.request(input);
+      if (input.method === "MOVE" && ++moves === 2) return { ...reply, status: 412 };
+      return reply;
+    } };
+    await expect(makeMutator(transport).verifyConditionalWrites()).resolves.toBeUndefined();
+    expect(dav.fileUrls()).toEqual([]);
+  });
+
+  it("repeats a probe MOVE without If-Match when the server rejects a matching ETag although the source is unchanged", async () => {
+    const dav = new FakeNextcloudDav(serverUrl, userId);
+    let valid = 0;
+    const attempts: Array<string | undefined> = [];
+    const transport: HttpTransport = { request: async (input) => {
+      if (input.method === "MOVE") {
+        attempts.push(input.headers?.["If-Match"]);
+        if (input.headers?.["If-Match"] && ++valid === 2) return { status: 412, headers: {}, text: "", arrayBuffer: new ArrayBuffer(0), json: () => ({}) };
+      }
       return await dav.request(input);
     } };
-    await makeMutator(transport).verifyConditionalWrites();
-    expect(destinations.length).toBeGreaterThan(0);
-    expect(destinations.every((destination) => /^[ -~]+$/.test(destination) && !/%F0|%3F|%23/i.test(destination))).toBe(true);
+    await expect(makeMutator(transport).verifyConditionalWrites()).resolves.toBeUndefined();
+    expect(attempts.filter((value) => value === undefined).length).toBe(1);
     expect(dav.fileUrls()).toEqual([]);
+  });
+
+  it("repeats a real rename without If-Match only when the source still has the expected ETag", async () => {
+    const dav = new FakeNextcloudDav(serverUrl, userId);
+    const root = `${serverUrl}/remote.php/dav/files/${userId}/`;
+    await dav.request({ url: root, method: "MKCOL" } as HttpRequest);
+    let reject = true;
+    const transport: HttpTransport = { request: async (input) => {
+      if (input.method === "MOVE" && input.headers?.["If-Match"] && reject) return { status: 412, headers: {}, text: "", arrayBuffer: new ArrayBuffer(0), json: () => ({}) };
+      return await dav.request(input);
+    } };
+    const mutator = makeMutator(transport);
+    const created = await mutator.uploadCreate(`${root}a.md`, "a.md", new TextEncoder().encode("alpha").buffer, 1_700_000_000_000);
+    const moved = await mutator.move(`${root}a.md`, "a.md", `${root}b.md`, "b.md", created.remote.fileId, created.remote.etag);
+    expect(moved.path).toBe("b.md");
+    // A genuinely changed source must still fail.
+    const second = await mutator.uploadCreate(`${root}c.md`, "c.md", new TextEncoder().encode("gamma").buffer, 1_700_000_000_000);
+    await mutator.uploadUpdate(`${root}c.md`, "c.md", new TextEncoder().encode("delta").buffer, second.remote.fileId, second.remote.etag, 1_700_000_100_000);
+    await expect(mutator.move(`${root}c.md`, "c.md", `${root}d.md`, "d.md", second.remote.fileId, second.remote.etag)).rejects.toThrow(/precondition/i);
+    reject = false;
   });
 
   it("only moves an upload mtime when it would collide with the stored remote second", () => {

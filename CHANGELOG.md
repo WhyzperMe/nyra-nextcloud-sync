@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.4
+
+- **Fixes the iPad "move conditional-write probe failed with HTTP 412":** the server-safety check no longer trusts a refused MOVE blindly. A rename with `Overwrite: F` can never destroy data, so after an unexpected answer Nyra looks at the real server state: if the file was already moved (the answer was lost or replayed) the step counts as done, and if Nextcloud rejected a matching ETag although the source is unchanged, the rename is repeated once without `If-Match`. A genuinely changed source still fails. If the check still fails, the message now lists the real state (source present or missing, destination, ETags).
+- **The same safeguard for real renames:** a remote rename that Nextcloud answers with a spurious 412 while the source still has the expected ETag is repeated once without `If-Match`; a changed source is still refused.
+- **Plain probe file names:** the connection probe no longer uses an emoji and the characters `# ? %` in its file name (it only tested path handling, which has its own tests). Sync clients that watch the same folder, such as the Nextcloud desktop client on Windows, no longer report "file name not supported" for it.
+
 ## 0.18.3
 
 - **Errors you can read in full on iPad and phone:** sync errors are no longer cut off with "…". The Overview shows a **Last sync failed** card with the complete message in a scrollable, selectable box, a **Copy** button and **Try again**. Rows in the activity list open on tap to show the full text (errors start open), and the Auto-sync status shows the real error instead of just "Attention". Messages in the box wrap and can be copied, so they can be pasted into a bug report.
