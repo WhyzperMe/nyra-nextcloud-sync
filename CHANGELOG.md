@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.18.1
+
+- **Clearer ETag diagnostics:** when the server-safety check pauses remote writes because Nextcloud did not advance the ETag after an immediate update, the message now says what happened (ETag unchanged, file id changed or no ETag), at which update and folder, with the observed values.
+
 ## 0.18.0
 
 - **Choose what to sync visually:** the new **Files** tab shows your vault as a tree (this device and Nextcloud together, loaded folder by folder, with sizes and "Server only" / "This device only" hints). Uncheck any file or folder to keep it out of sync in both directions; a half-checked folder has excluded items inside. Excluded items are never uploaded, downloaded or deleted, and including them again compares both sides by content instead of replaying old deletions.

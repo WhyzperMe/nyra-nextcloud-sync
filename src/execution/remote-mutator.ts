@@ -128,7 +128,9 @@ export class RemoteTransactionalMutator {
         this.assertSuccess(updated, [200, 204], "update conditional-write probe");
         const after = await this.stat(probeUrl, probePath);
         if (after.fileId !== initialFileId || !after.etag || after.etag === previous.etag) {
-          throw new NyraError("remote-precondition-unreliable", "Nextcloud did not advance the ETag after an immediate update; remote writes are paused to avoid overwriting concurrent edits.");
+          const reason = after.fileId !== initialFileId ? "file id changed" : !after.etag ? "no ETag returned" : "ETag unchanged";
+          const detail = `${reason}; update ${attempt + 1} at ${rootPath || "account root"}; etag ${previous.etag} -> ${after.etag ?? "none"}; file id ${initialFileId ?? "none"} -> ${after.fileId ?? "none"}`;
+          throw new NyraError("remote-precondition-unreliable", `Nextcloud did not advance the ETag after an immediate update; remote writes are paused to avoid overwriting concurrent edits. (${detail})`);
         }
         const stale = await this.requestWithRetry({ url: probeUrl, method: "PUT", headers: this.headers({ "If-Match": previous.etag!, ...probeMtime }), body: forbidden.buffer }, false);
         if (stale.status !== 412) throw new NyraError("remote-precondition-unreliable", "Nextcloud accepted a stale If-Match PUT; remote writes are paused to avoid overwriting concurrent edits.");
