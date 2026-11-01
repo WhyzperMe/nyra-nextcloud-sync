@@ -33,6 +33,24 @@ export async function runStorageSelfTest(adapter: DataAdapter, dir: string): Pro
       if ((await adapter.read(`${dir}/t.txt`)) !== text) throw new Error("Text came back different.");
       return "ok";
     });
+    await check("Recovery-file write (text, then binary, then rename)", async () => {
+      const json = JSON.stringify({ version: 2, kind: "replace", targetPath: "Schule/Übung 📱/Aufgabe.md", createdAt: new Date().toISOString() });
+      const bytes = new TextEncoder().encode(json);
+      const staged = `${dir}/apply_x.json.tmp_y.tmp`;
+      await adapter.write(staged, json);
+      const stat = await adapter.stat(staged);
+      if (!stat || stat.size !== bytes.byteLength) throw new Error(`text write: stat reports ${stat?.size ?? "nothing"} bytes, expected ${bytes.byteLength}.`);
+      const text = await adapter.read(staged);
+      if (text !== json) throw new Error(`text write: read back ${text.length} of ${json.length} characters.`);
+      const binary = new TextDecoder().decode(await adapter.readBinary(staged));
+      if (binary !== json) throw new Error(`text write: binary read back ${binary.length} of ${json.length} characters.`);
+      await adapter.rename(staged, `${dir}/apply_x.json`);
+      if ((await adapter.read(`${dir}/apply_x.json`)) !== json) throw new Error("After the rename the text differs.");
+      const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+      await adapter.writeBinary(`${dir}/apply_z.json`, buffer);
+      if ((await adapter.read(`${dir}/apply_z.json`)) !== json) throw new Error("A binary write does not read back as the same text.");
+      return "ok";
+    });
     for (const size of SIZES) {
       await check(`Binary round trip ${size >= 1048576 ? `${size / 1048576} MiB` : `${size} B`}`, async () => {
         const data = new Uint8Array(size).map((_, index) => (index * 31 + 7) & 255);

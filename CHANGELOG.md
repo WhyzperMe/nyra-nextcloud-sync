@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.26.0
+
+**Phone: "local apply manifest staging verification failed" no longer ends a sync.**
+
+- **What the manifest is.** Before Nyra replaces, deletes or moves a file on the device it writes a small recovery note (the manifest), so an interrupted operation can be finished or undone at the next start. Writing it was proven by reading the file straight back and requiring the same text. If a phone cannot do that, every write failed with the same error.
+- **Four independent ways to write it.** Nyra now tries a text write, a binary write, a binary write to the final name, and finally a size-and-parse check, each with its own patient read-back (text, binary, and as a JSON value). The strategy that worked is remembered, so a phone pays for a fallback once.
+- **Safe where the rename is atomic.** Creating a new file or moving a file is a single rename, so the manifest is only bookkeeping there; if it cannot be proven, the operation continues without it (and the next 25 such operations skip the attempt instead of waiting seconds each). **Replacing or deleting an existing file still requires a proven manifest**, so your notes stay protected.
+- **Errors now say why.** If nothing can be proven, the message lists, per strategy, what the storage returned: whether the file exists, its size against the expected size, how many characters came back, and where the first difference is. That turns the next report into a diagnosis.
+- **Self-test.** Diagnostics → "Test this device's storage" now also checks the exact recovery-file pattern (text write, size, text and binary read, rename, binary write).
+- 3 new tests with phone-like storage whose reads fail.
+
 ## 0.25.0
 
 **"Upload everything" is now a real emergency button.**

@@ -84,6 +84,10 @@ export class LocalTransactionalMutator {
   private readonly pluginDataRoot: string;
   private readonly reservedWorkspaceFiles: ReadonlySet<string>;
   private readonly maxWholeFileBytes: number;
+  /** The manifest strategy that worked last time is tried first, so a phone pays for a fallback once. */
+  private manifestStrategyStart = 0;
+  /** After every strategy failed, optional manifests are skipped for a while instead of costing seconds per file. */
+  private manifestSkipOptional = 0;
 
   constructor(
     vault: Vault,
@@ -220,7 +224,9 @@ export class LocalTransactionalMutator {
         version: 2, operationId, kind: "replace", sourcePath: null, targetPath, stagingPath, recoveryPath,
         expectedSourceHash: expectedCurrentHash, desiredHash: committedHash, desiredSize, createdAt: new Date().toISOString()
       };
-      await this.writeManifest(manifestPath, manifest);
+      // Creating a file renames its verified staging file into a free path in one step, so the manifest is
+      // bookkeeping there; replacing an existing file cannot go without it.
+      await this.writeManifest(manifestPath, manifest, recoveryPath === null);
     } catch (error) {
       // If a manifest reached durable storage, startup recovery owns the staged
       // data. Otherwise it is safe to discard this incomplete temporary file.
@@ -255,7 +261,7 @@ export class LocalTransactionalMutator {
       const finalStat = await this.adapter.stat(targetPath);
       if (!finalStat || finalStat.type !== "file") throw new Error(`Local replace postcondition failed for '${targetPath}'.`);
       await this.removeVerifiedRecovery(manifest);
-      await this.adapter.remove(manifestPath);
+      await this.removeManifestIfPresent(manifestPath);
       return { path: targetPath, contentHash: committedHash, size: desiredSize, mtimeMs: finalStat.mtime };
     } catch (error) {
       // Some adapters can report an error after an atomic rename has already
@@ -356,7 +362,7 @@ export class LocalTransactionalMutator {
       expectedSourceHash: expectedHash, desiredHash: expectedHash, desiredSize: source.size, createdAt: new Date().toISOString()
     };
     const manifestPath = `${this.journalDir}/${operationId}.json`;
-    await this.writeManifest(manifestPath, manifest);
+    await this.writeManifest(manifestPath, manifest, true);
     try {
       await this.adapter.rename(sourcePath, targetPath);
     } catch (error) {
@@ -559,23 +565,89 @@ export class LocalTransactionalMutator {
     }
   }
 
-  private async writeManifest(path: string, manifest: ApplyManifest): Promise<void> {
+  /**
+   * Writes the crash-recovery manifest and proves it is durable. Phone storage is the hard case: reading a
+   * file straight after writing it can return a stale, empty or re-encoded result. The write therefore tries
+   * several independent strategies (text staged, binary staged, direct binary, and finally a size-and-parse
+   * check), and every failure is recorded with what the storage actually returned, so an error names its
+   * cause instead of just saying that verification failed.
+   *
+   * Returns false only when `optional` is set and no strategy could be proven; callers set it for operations
+   * whose single rename is atomic by itself (creating a file, moving a file), where the manifest is
+   * bookkeeping. Replacing or deleting an existing file needs it and throws instead.
+   */
+  private async writeManifest(path: string, manifest: ApplyManifest, optional = false): Promise<boolean> {
+    if (optional && this.manifestSkipOptional > 0) { this.manifestSkipOptional -= 1; return false; }
     const data = JSON.stringify(manifest);
-    const temp = `${path}.${randomId("tmp")}.tmp`;
-    // Phone storage may hand back a stale, short or re-encoded read right after a write. The manifest is
-    // small JSON, so the read-back is retried and compared as a value, not only as exact text.
-    const readsBack = (target: string) => settles(async () => {
-      if (sameJson(await this.adapter.read(target), data)) return true;
-      return sameJson(new TextDecoder().decode(await this.adapter.readBinary(target)), data);
-    }, [50, 150, 400, 1000, 2000]);
-    try {
-      await this.adapter.write(temp, data);
-      if (!(await readsBack(temp))) throw new Error("Local apply manifest staging verification failed.");
-      await this.adapter.rename(temp, path);
-      if (!(await readsBack(path))) throw new Error("Local apply manifest commit verification failed.");
-    } finally {
-      if (await this.adapter.exists(temp)) await this.adapter.remove(temp);
+    const bytes = new TextEncoder().encode(data);
+    const notes: string[] = [];
+    const strategies: Array<{ name: string; staged: boolean; write: (target: string) => Promise<void>; relaxed?: boolean }> = [
+      { name: "text-staged", staged: true, write: async (target) => { await this.adapter.write(target, data); } },
+      { name: "binary-staged", staged: true, write: async (target) => { await this.adapter.writeBinary(target, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer); } },
+      { name: "binary-direct", staged: false, write: async (target) => { await this.adapter.writeBinary(target, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer); } },
+      { name: "size-only", staged: false, relaxed: true, write: async (target) => { await this.adapter.write(target, data); } }
+    ];
+    const order = strategies.map((_, index) => (index + this.manifestStrategyStart) % strategies.length);
+    for (const index of order) {
+      const strategy = strategies[index]!;
+      const temp = `${path}.${randomId("tmp")}.tmp`;
+      const stagePath = strategy.staged ? temp : path;
+      let committing = false;
+      try {
+        if (!strategy.staged && await this.adapter.exists(path)) await this.adapter.remove(path);
+        await strategy.write(stagePath);
+        const staged = await this.manifestReadsBack(stagePath, data, bytes, strategy.relaxed === true);
+        if (!staged.ok) { notes.push(`${strategy.name}: ${staged.note}`); continue; }
+        if (strategy.staged) {
+          committing = true;
+          await this.adapter.rename(stagePath, path);
+          committing = false;
+          const committed = await this.manifestReadsBack(path, data, bytes, false);
+          if (!committed.ok) { notes.push(`${strategy.name} (after rename): ${committed.note}`); continue; }
+        }
+        if (notes.length > 0) this.logger.warn("apply.manifest-needed-fallback", { strategy: strategy.name, earlier: notes });
+        this.manifestStrategyStart = index;
+        return true;
+      } catch (error) {
+        // A failing rename may or may not have committed; that ambiguity is the caller's to resolve, never retried here.
+        if (committing) throw error;
+        notes.push(`${strategy.name}: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        try { if (strategy.staged && await this.adapter.exists(temp)) await this.adapter.remove(temp); } catch { /* the temp name is unique; a later sweep removes leftovers */ }
+      }
     }
+    // Nothing proved durable: do not leave a half-written manifest that recovery would choke on.
+    try { if (await this.adapter.exists(path)) await this.adapter.remove(path); } catch { /* best effort */ }
+    this.logger.error("apply.manifest-unverifiable", { path, notes });
+    this.manifestStrategyStart = 0;
+    if (optional) { this.manifestSkipOptional = 25; return false; }
+    throw new Error(`Local apply manifest could not be verified on this device (${notes.join(" | ")}).`);
+  }
+
+  /** Reads the file back the ways a phone might manage and explains what it saw when none matches. */
+  private async manifestReadsBack(target: string, data: string, bytes: Uint8Array, relaxed: boolean): Promise<{ ok: boolean; note: string }> {
+    let note = "";
+    const ok = await settles(async () => {
+      const seen: string[] = [];
+      let text: string | null = null;
+      try { text = await this.adapter.read(target); } catch (error) { seen.push(`read threw ${error instanceof Error ? error.message : String(error)}`); }
+      if (text !== null && sameJson(text, data)) return true;
+      let binary: Uint8Array | null = null;
+      try { binary = new Uint8Array(await this.adapter.readBinary(target)); } catch (error) { seen.push(`readBinary threw ${error instanceof Error ? error.message : String(error)}`); }
+      if (binary && (equalBytes(binary, bytes) || sameJson(new TextDecoder().decode(binary), data))) return true;
+      let size: number | null = null;
+      try { size = (await this.adapter.stat(target))?.size ?? null; } catch { /* reported below */ }
+      if (relaxed && size === bytes.byteLength && text !== null) {
+        try { JSON.parse(text); return true; } catch { /* fall through to the diagnosis */ }
+      }
+      const exists = await this.adapter.exists(target).catch(() => false);
+      seen.push(`exists=${exists}`, `stat=${size ?? "none"} of ${bytes.byteLength} bytes`);
+      seen.push(text === null ? "text=none" : `text=${text.length} of ${data.length} chars${firstDifference(text, data)}`);
+      seen.push(binary ? `binary=${binary.byteLength} bytes` : "binary=none");
+      note = seen.join(", ");
+      return false;
+    }, [50, 150, 400, 1000, 2000]);
+    return { ok, note };
   }
 
   private parseApplyManifest(manifestPath: string, raw: unknown): ApplyManifest {
@@ -804,3 +876,18 @@ class MemoryPreparedSnapshot implements PreparedLocalSnapshot {
 }
 
 async function* singleChunk(bytes: ArrayBuffer): AsyncIterable<ArrayBuffer> { yield bytes; }
+
+function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let index = 0; index < a.byteLength; index += 1) if (a[index] !== b[index]) return false;
+  return true;
+}
+
+/** " (first difference at 17: 'x' vs 'y')" or an empty string when one text is a prefix of the other. */
+function firstDifference(seen: string, expected: string): string {
+  const length = Math.min(seen.length, expected.length);
+  for (let index = 0; index < length; index += 1) {
+    if (seen[index] !== expected[index]) return ` (first difference at ${index}: ${JSON.stringify(seen[index])} vs ${JSON.stringify(expected[index])})`;
+  }
+  return "";
+}
