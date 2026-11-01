@@ -299,13 +299,13 @@ export class DurableStateStore {
       if (builder.mutations.length === 0) return structuredClone(this.state);
 
       // Validate the resulting state and all immutable references before writing intent.
+      await this.verifyMutationBlobReferences(builder.mutations, base);
       const candidate = applyMutations(
         base,
         builder.mutations,
         newGeneration,
         new Date().toISOString()
       );
-      await this.verifyMutationBlobReferences(builder.mutations);
 
       let beginSequence: string | null = null;
       try {
@@ -620,31 +620,52 @@ export class DurableStateStore {
     }
   }
 
-  private async verifyMutationBlobReferences(mutations: readonly DurableMutation[]): Promise<void> {
-    const sized = new Map<string, number>();
-    const hashOnly = new Set<string>();
+  /**
+   * Proves every immutable object a transaction names, and repairs the two cases where a lost object must
+   * not block sync forever:
+   *  - a tombstone's previousBlobHash is only a recovery hint; it is dropped when the object is not stored
+   *    (a file that never reached a baseline has no stored copy);
+   *  - a record that merely carries its existing baseline forward loses that baseline when the object is
+   *    gone, which turns it into a "no common ancestor" record (never a deletion) that normal planning and
+   *    conflict handling settle.
+   * A baseline that a transaction newly introduces must still verify, or the transaction is refused.
+   */
+  private async verifyMutationBlobReferences(mutations: DurableMutation[], base: Readonly<DurableState>): Promise<void> {
+    const sizes = new Map<string, number>();
+    const verdicts = new Map<string, boolean>();
+    const verified = async (hash: string, size?: number): Promise<boolean> => {
+      const key = `${hash}:${size ?? "*"}`;
+      let verdict = verdicts.get(key);
+      if (verdict === undefined) {
+        verdict = await this.objects.hasVerified(hash, size);
+        verdicts.set(key, verdict);
+      }
+      return verdict;
+    };
     for (const mutation of mutations) {
       if (mutation.kind === "put-file" && mutation.record.baseline) {
-        const { blobHash, size } = mutation.record.baseline;
-        const previous = sized.get(blobHash);
+        const record = mutation.record;
+        const { blobHash, size } = record.baseline!;
+        const previous = sizes.get(blobHash);
         if (previous !== undefined && previous !== size) {
           throw new Error(`Durable transaction references immutable object ${blobHash} with inconsistent sizes.`);
         }
-        sized.set(blobHash, size);
+        sizes.set(blobHash, size);
+        if (await verified(blobHash, size)) continue;
+        if (base.files[record.entryId]?.baseline?.blobHash !== blobHash) {
+          throw new Error(`Durable transaction references missing, corrupt, or size-mismatched immutable object ${blobHash}.`);
+        }
+        this.logger.warn("state.lost-baseline-object-released", { entryId: record.entryId, blobHash });
+        record.baseline = null;
+        record.status = record.local && record.remote ? "both-dirty" : record.local ? "local-dirty" : record.remote ? "remote-dirty" : "conflict";
       }
+    }
+    for (const mutation of mutations) {
       if (mutation.kind === "put-tombstone" && mutation.record.previousBlobHash) {
-        hashOnly.add(mutation.record.previousBlobHash);
-      }
-    }
-    for (const [hash, size] of sized) {
-      if (!(await this.objects.hasVerified(hash, size))) {
-        throw new Error(`Durable transaction references missing, corrupt, or size-mismatched immutable object ${hash}.`);
-      }
-      hashOnly.delete(hash);
-    }
-    for (const hash of hashOnly) {
-      if (!(await this.objects.hasVerified(hash))) {
-        throw new Error(`Durable transaction references missing or corrupt immutable object ${hash}.`);
+        const hash = mutation.record.previousBlobHash;
+        if (await verified(hash, sizes.get(hash)) || await verified(hash)) continue;
+        this.logger.warn("state.tombstone-hint-dropped", { tombstoneId: mutation.record.tombstoneId, blobHash: hash });
+        mutation.record.previousBlobHash = null;
       }
     }
   }

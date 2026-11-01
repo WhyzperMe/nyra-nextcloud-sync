@@ -3,6 +3,14 @@ import type { LocalPathPolicy } from "../local/path-policy";
 import { canonicalVaultRelativePath } from "../state/durable/path";
 import type { LocalTree } from "./folder-sync";
 
+const SYSTEM_JUNK = new Set([".ds_store", "thumbs.db", "desktop.ini", ".nomedia", ".localized", ".directory"]);
+
+/** Metadata files created by the operating system or a file manager, never by the user. */
+export function isSystemJunk(path: string): boolean {
+  const name = path.slice(path.lastIndexOf("/") + 1).toLowerCase();
+  return SYSTEM_JUNK.has(name) || /^\._./.test(name);
+}
+
 /** Adapter-backed folder operations. Uses only the portable Obsidian DataAdapter API. */
 export class LocalFolderAccess {
   constructor(private readonly adapter: DataAdapter, private readonly policy: LocalPathPolicy) {}
@@ -44,7 +52,16 @@ export class LocalFolderAccess {
     const path = this.includedPath(pathInput);
     if (!await this.adapter.exists(path)) return true;
     const listing = await this.adapter.list(path);
-    if (listing.files.length > 0 || listing.folders.length > 0) return false;
+    if (listing.folders.length > 0) return false;
+    // Operating systems and file managers drop metadata files into folders. They are not notes, never
+    // sync, and must not keep an otherwise empty folder alive for ever (Android and desktop file
+    // managers create them far more often than iOS does).
+    const junk = listing.files.filter(isSystemJunk);
+    if (junk.length !== listing.files.length) return false;
+    for (const file of junk) {
+      try { await this.adapter.remove(file); }
+      catch { if (await this.adapter.exists(file)) return false; }
+    }
     await this.adapter.rmdir(path, false);
     return true;
   }

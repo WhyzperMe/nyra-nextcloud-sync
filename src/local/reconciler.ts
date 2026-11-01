@@ -222,7 +222,8 @@ function ensureLocalTombstone(tx: DurableTransaction, base: DurableState, existi
     entryId: existing.entryId,
     previousPath: existing.local?.path ?? existing.path,
     deletedSide: "local",
-    previousBlobHash: existing.baseline?.blobHash ?? existing.local?.contentHash ?? null,
+    // Only a baseline is a stored object; a local content hash alone names bytes that were never kept.
+    previousBlobHash: existing.baseline?.blobHash ?? null,
     previousRemoteFileId: existing.remote?.fileId ?? null,
     createdAt: new Date().toISOString()
   });

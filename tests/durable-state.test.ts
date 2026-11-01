@@ -646,3 +646,58 @@ describe("Durable state", () => {
   });
 
 });
+
+describe("Durable state: lost immutable objects do not block sync for ever", () => {
+  const stamp = () => new Date().toISOString();
+  const baselineFor = (hash: string, size: number, path: string) => ({ blobHash: hash, size, createdAt: stamp(), path, remoteFileId: "1", remoteEtag: '"e"' });
+
+  it("drops a tombstone recovery hint whose object was never stored", async () => {
+    const store = await DurableStateStore.open(new MemoryStateBackend(), logger);
+    await store.transact("tomb", (tx) => tx.putTombstone({
+      tombstoneId: randomId("tomb"), entryId: randomId("entry"), previousPath: "Never.md", deletedSide: "local",
+      previousBlobHash: "e".repeat(64), previousRemoteFileId: null, createdAt: stamp()
+    }));
+    const [tombstone] = Object.values(store.getState().tombstones);
+    expect(tombstone?.previousBlobHash).toBeNull();
+    expect(store.summary().status).toBe("ready");
+  });
+
+  it("keeps a verified hint, and releases a carried-forward baseline whose object vanished", async () => {
+    const backend = new MemoryStateBackend();
+    const store = await DurableStateStore.open(backend, logger);
+    const blob = await store.putTextBlob("hello");
+    const entryId = randomId("entry");
+    await store.transact("seed", (tx) => {
+      tx.putFile({
+        entryId, path: "Note.md", baseline: baselineFor(blob.hash, blob.size, "Note.md"),
+        local: { path: "Note.md", contentHash: blob.hash, size: blob.size, mtimeMs: 1 },
+        remote: { path: "Note.md", contentHash: blob.hash, reportedSha256: null, etag: '"e"', fileId: "1", size: blob.size, mtimeMs: 1 },
+        status: "clean"
+      });
+      tx.putTombstone({
+        tombstoneId: randomId("tomb"), entryId: randomId("entry"), previousPath: "Kept.md", deletedSide: "remote",
+        previousBlobHash: blob.hash, previousRemoteFileId: null, createdAt: stamp()
+      });
+    });
+    expect(Object.values(store.getState().tombstones)[0]?.previousBlobHash).toBe(blob.hash);
+
+    // The object disappears from storage (cleared cache, partial restore, failed write).
+    await backend.remove(`objects/${blob.hash.slice(0, 2)}/${blob.hash}.blob`);
+    const record = store.getState().files[entryId]!;
+    await store.transact("observe-local-edit", (tx) => tx.putFile({
+      entryId, path: record.path, baseline: record.baseline,
+      local: { path: "Note.md", contentHash: "c".repeat(64), size: 9, mtimeMs: 2 }, remote: record.remote, status: "local-dirty"
+    }));
+    const healed = store.getState().files[entryId]!;
+    expect(healed.baseline).toBeNull();
+    expect(healed.status).toBe("both-dirty");
+    expect(healed.local?.contentHash).toBe("c".repeat(64));
+  });
+
+  it("still refuses a brand-new baseline whose object is missing", async () => {
+    const store = await DurableStateStore.open(new MemoryStateBackend(), logger);
+    await expect(store.transact("new-baseline", (tx) => tx.putFile({
+      entryId: randomId("entry"), path: "New.md", baseline: baselineFor("a".repeat(64), 3, "New.md"), local: null, remote: null, status: "clean"
+    }))).rejects.toThrow(/missing, corrupt, or size-mismatched/i);
+  });
+});

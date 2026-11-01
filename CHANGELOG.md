@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.22.0
+
+**Phone: "Download blocked: durable transaction references missing or corrupt immutable object …" and folders that never get removed.**
+
+- **Root cause of the blocked download.** When a file that never reached a stored baseline disappeared locally, Nyra wrote a deletion record that pointed at a content hash that was never saved. The state store (rightly) refused to commit a reference to a missing object, so the local scan threw, and that scan runs first in every download and sync. One such file kept the whole phone blocked. Deletion records now only reference stored baselines, and the store drops a recovery hint whose object is not stored instead of failing.
+- **Lost baseline objects no longer wedge sync.** If a stored baseline copy vanishes (cleared cache, interrupted write, partial restore), a record that only carries it forward now loses that baseline and is treated as "no common ancestor" (never as a deletion), so normal planning and automatic conflict handling take over. A brand-new baseline must still verify.
+- **Folders.** A cycle that fails on one file no longer skips folder housekeeping (it re-checks emptiness on both sides, so it is safe after a partial run); the blocked scan above was the most likely reason folders never disappeared on the phone. Folders that only hold system metadata (.nomedia, Thumbs.db, desktop.ini, .DS_Store, ._ files, .directory) are now removed as empty, because Android file managers leave these behind.
+- **Phone storage hardening.** Whole-file reads retry twice before a file is declared "changed while being read", which covers short reads right after a write.
+- 9 new tests: unstored tombstone hints, lost baseline release, new baselines still verified, folder junk removal, folder pass after a failed plan.
+
 ## 0.21.0
 
 **Phone sync no longer stops with "Local transfer snapshot chunk failed size verification" or "Durable state store is degraded".**

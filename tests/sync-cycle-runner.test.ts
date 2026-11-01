@@ -196,3 +196,22 @@ describe("sync cycle runner replanning", () => {
     expect(unsafe).toBe(1);
   });
 });
+
+describe("Sync cycle runner folder housekeeping", () => {
+  it("still mirrors folders when applying the plan fails, then reports the original error", async () => {
+    const readyPlan: SyncPlan = { ...noopPlan, summary: { ...noopPlan.summary, total: 1, ready: 1 } };
+    let folderRuns = 0;
+    await expect(new SyncCycleRunner(port({
+      buildPlan: async () => readyPlan,
+      applyPlan: async () => { throw new Error("one file failed"); },
+      syncFolders: async () => { folderRuns++; return 0; }
+    })).run("manual", true)).rejects.toThrow("one file failed");
+    expect(folderRuns).toBe(1);
+
+    await expect(new SyncCycleRunner(port({
+      buildPlan: async () => readyPlan,
+      applyPlan: async () => { throw new Error("one file failed"); },
+      syncFolders: async () => { throw new Error("folders failed too"); }
+    })).run("manual", true)).rejects.toThrow("one file failed");
+  });
+});

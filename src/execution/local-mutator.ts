@@ -125,14 +125,24 @@ export class LocalTransactionalMutator {
 
   async readVerified(pathInput: string, expectedHash?: string | null): Promise<LocalWriteResult & { bytes: ArrayBuffer }> {
     const path = canonicalVaultRelativePath(pathInput);
-    const first = await this.adapter.stat(path);
-    if (!first || first.type !== "file") throw new Error(`Local precondition failed: '${path}' is missing.`);
-    this.assertWithinMemoryLimit(path, first.size);
-    const bytes = await this.adapter.readBinary(path);
-    const second = await this.adapter.stat(path);
-    if (!second || second.type !== "file" || second.size !== first.size || second.mtime !== first.mtime || bytes.byteLength !== second.size) {
-      throw new Error(`Local precondition failed: '${path}' changed while being read.`);
+    // A phone can hand back a short or stale read, or see a file that a sync client is still writing.
+    // Two more attempts with a short pause tell that apart from a genuine concurrent edit.
+    let bytes: ArrayBuffer | null = null;
+    let second: { type: string; size: number; mtime: number } | null = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (attempt > 0) await new Promise<void>((resolve) => setTimeout(resolve, 60 * attempt));
+      const first = await this.adapter.stat(path);
+      if (!first || first.type !== "file") throw new Error(`Local precondition failed: '${path}' is missing.`);
+      this.assertWithinMemoryLimit(path, first.size);
+      const read = await this.adapter.readBinary(path);
+      const after = await this.adapter.stat(path);
+      if (after && after.type === "file" && after.size === first.size && after.mtime === first.mtime && read.byteLength === after.size) {
+        bytes = read;
+        second = after;
+        break;
+      }
     }
+    if (!bytes || !second) throw new Error(`Local precondition failed: '${path}' changed while being read.`);
     const contentHash = await sha256Hex(bytes);
     if (expectedHash && contentHash !== expectedHash) throw new Error(`Local precondition failed: '${path}' content changed since planning.`);
     return { path, bytes, contentHash, size: bytes.byteLength, mtimeMs: second.mtime };

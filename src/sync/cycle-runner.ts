@@ -101,7 +101,15 @@ export class SyncCycleRunner {
     let bytesProcessed = 0;
     let reviewCount = reviewItems;
     if (executable > 0) {
-      const report = await this.port.applyPlan(allowDeletes);
+      let report;
+      try {
+        report = await this.port.applyPlan(allowDeletes);
+      } catch (error) {
+        // One failing file must not freeze folder housekeeping. Folder operations re-check emptiness on both
+        // sides and keep any folder that still holds a file, so they are safe after a partial run.
+        await this.port.syncFolders(allowDeletes).catch(() => 0);
+        throw error;
+      }
       completedSteps = report.completed;
       blockedSteps = report.blocked;
       bytesProcessed = report.bytesProcessed;
