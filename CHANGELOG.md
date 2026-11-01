@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.23.0
+
+**Nothing is deleted on Nextcloud because a device looks empty, and one tap restores what was lost.**
+
+- **Restore everything deleted since…** (Settings → Devices → Restore deleted files, or the command "Restore deleted files…"). Pick a time (last hour, 6 hours, 24 hours, 7 days, 30 days, or any date and time), see how many items it covers, and tap once. Items come back from the Nextcloud trash bin (folders first, missing parent folders are recreated), and files the trash bin no longer has are written back from the copies this device retained. Nothing existing is overwritten and one failing item never stops the rest. Restored files then sync to the device.
+- **A wiped side is never mirrored.** If this device shows no files while Nextcloud holds them, Nyra holds every deletion on Nextcloud at any size (even a three-file vault), and the same applies the other way round. These holds are never released automatically; the notice says what is happening and what to do.
+- **Automatic approval is narrower.** Held deletions are released by themselves only if they remove files from this device, stay under a tenth of the tracked files and have waited 10 minutes. Deleting on Nextcloud always needs a person.
+- **Download from Nextcloud works on an emptied phone.** A device that still remembered its old files read the empty vault as "everything was deleted" and refused to download. The button now forgets those stale histories first (without any deletion intent) and then downloads.
+- **Test this device's storage** (Diagnostics): writes, reads back three times, appends, renames, lists hidden files and checks modification times in a scratch folder, and names the exact failing step.
+- 18 new tests.
+
 ## 0.22.0
 
 **Phone: "Download blocked: durable transaction references missing or corrupt immutable object …" and folders that never get removed.**

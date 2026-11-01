@@ -151,29 +151,54 @@ describe("deletion hold", () => {
     expect(hold.evaluate(big, 20, 1000).decision.held).toBe(true);
   });
 
-  it("approves held deletions on its own only after the wait and only while the batch stays plausible", async () => {
+  it("approves held deletions on its own only for small local-only batches after the wait", async () => {
     const { DeletionHold } = await import("../src/execution/deletion-hold");
     const grace = 10 * 60_000;
     let now = 5_000_000;
     const hold = new DeletionHold(() => now);
-    const batch = deletes(30);
-    hold.evaluate(batch, 20, 1000);
+    const batch = deletes(30, "delete-local");
+    hold.evaluate(batch, 20, 1000, { localReplicas: 970, remoteReplicas: 970 });
 
-    expect(hold.autoApprove(grace, 0.5, 1000)).toBe(false); // just detected
+    expect(hold.autoApprove(grace, 0.1, 1000)).toBe(false); // just detected
     now += grace - 1;
-    expect(hold.autoApprove(grace, 0.5, 1000)).toBe(false);
+    expect(hold.autoApprove(grace, 0.1, 1000)).toBe(false);
     now += 1;
-    expect(hold.autoApprove(grace, 0.5, 1000)).toBe(true);
+    expect(hold.autoApprove(grace, 0.1, 1000)).toBe(true);
     expect(hold.approvedItems()).toBe(30);
-    expect(hold.autoApprove(grace, 0.5, 1000)).toBe(false); // already approved
-    expect(hold.evaluate(batch, 20, 1000).decision.held).toBe(false);
+    expect(hold.autoApprove(grace, 0.1, 1000)).toBe(false); // already approved
 
-    const mass = new DeletionHold(() => now);
-    mass.evaluate(deletes(30), 20, 40); // 75% of a 40-file vault looks like a disaster
+    const big = new DeletionHold(() => now);
+    big.evaluate(deletes(150, "delete-local"), 20, 1000, { localReplicas: 850, remoteReplicas: 1000 });
     now += grace * 2;
-    expect(mass.autoApprove(grace, 0.5, 40)).toBe(false);
-    expect(mass.summary()).not.toBeNull();
-    expect(new DeletionHold(() => now).autoApprove(grace, 0.5, 1000)).toBe(false); // nothing pending
+    expect(big.autoApprove(grace, 0.1, 1000)).toBe(false); // 15% is no routine cleanup
+
+    const remote = new DeletionHold(() => now);
+    remote.evaluate(deletes(30, "delete-remote"), 20, 1000, { localReplicas: 970, remoteReplicas: 1000 });
+    now += grace * 2;
+    expect(remote.autoApprove(grace, 0.1, 1000)).toBe(false); // Nextcloud is never changed without a person
+    expect(remote.summary()).not.toBeNull();
+    expect(new DeletionHold(() => now).autoApprove(grace, 0.1, 1000)).toBe(false); // nothing pending
+  });
+
+  it("holds a wiped side at any size and never releases it by itself", async () => {
+    const { DeletionHold } = await import("../src/execution/deletion-hold");
+    // A phone whose vault reads as empty: even 3 files of a 3-file vault must not be removed from Nextcloud.
+    const guard = evaluateDeleteGuard(deletes(3), { threshold: 20, trackedFiles: 3, approvedItems: 0, localReplicas: 0, remoteReplicas: 3 });
+    expect(guard).toMatchObject({ held: true, suspicious: "local-vault-empty" });
+    expect(evaluateDeleteGuard(deletes(1), { threshold: 20, trackedFiles: 40, approvedItems: 0, localReplicas: 0, remoteReplicas: 40 }).held).toBe(true);
+    // The mirror image: Nextcloud reads as empty, so local files must not be removed.
+    expect(evaluateDeleteGuard(deletes(2, "delete-local"), { threshold: 20, trackedFiles: 10, approvedItems: 0, localReplicas: 10, remoteReplicas: 0 }))
+      .toMatchObject({ held: true, suspicious: "remote-vault-empty" });
+    // Ordinary edits are untouched.
+    expect(evaluateDeleteGuard(deletes(2), { threshold: 20, trackedFiles: 500, approvedItems: 0, localReplicas: 498, remoteReplicas: 500 }).held).toBe(false);
+
+    let now = 1_000_000;
+    const hold = new DeletionHold(() => now);
+    hold.evaluate(deletes(3), 20, 3, { localReplicas: 0, remoteReplicas: 3 });
+    expect(hold.summary()?.suspicious).toBe("local-vault-empty");
+    now += 24 * 60 * 60_000;
+    expect(hold.autoApprove(1, 1, 3)).toBe(false);
+    expect(hold.approve()).toBe(true); // an explicit, informed approval still works
   });
 
   it("counts held folder removals and reports nothing when idle", async () => {

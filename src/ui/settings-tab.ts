@@ -1,4 +1,5 @@
 import { Notice, PluginSettingTab, Setting, type App, type TextComponent } from "obsidian";
+import { RecoveryModal } from "./recovery-modal";
 import { errorMessage } from "../core/errors";
 import { normalizeServerUrl, parseNextcloudLocation } from "../security/url-policy";
 import type NyraNextcloudSyncPlugin from "../main";
@@ -240,6 +241,18 @@ export class NyraNextcloudSyncSettingTab extends PluginSettingTab {
     title.dataset.nyraFocusKey = "overview-diagnostics-summary";
     title.appendChild(createIcon("info", 15));
     title.createSpan({ text: "Diagnostics" });
+    new Setting(advanced)
+      .setName("Test this device's storage")
+      .setDesc("Writes, reads back, appends, renames and lists scratch files to prove that this device's file layer behaves. Run it on the phone and send me any line marked as failed.")
+      .addButton((button) => button.setButtonText(this.busy.has("selftest") ? "Testing…" : "Run test").setDisabled(this.busy.has("selftest") || this.owner.isSyncBusy()).onClick(() => {
+        void this.run("selftest", async () => {
+          const checks = await this.owner.runStorageSelfTest();
+          const failed = checks.filter((check) => !check.ok);
+          const lines = checks.map((check) => `${check.ok ? "✓" : "✗"} ${check.name}: ${check.detail}`).join("\n");
+          new Notice(failed.length === 0 ? "Storage test passed: every check was fine." : `Storage test found ${failed.length} problem${failed.length === 1 ? "" : "s"}:\n${lines}`, failed.length === 0 ? 8_000 : 60_000);
+          console.info("[Nyra storage self-test]\n" + lines);
+        }, "Storage test failed");
+      }));
     const grid = advanced.createDiv({ cls: "nyra-nc-diag-grid" });
     grid.append(
       statusCard("Account", humanState(this.owner.settings.connectionState), connectionTone(this.owner.settings.connectionState), this.connectionDetail()),
@@ -264,6 +277,11 @@ export class NyraNextcloudSyncSettingTab extends PluginSettingTab {
       .addToggle((toggle) => toggle.setValue(this.owner.settings.syncObsidianConfig).setDisabled(busy).onChange((value) => {
         return this.updateAndDisplay((settings) => { settings.syncObsidianConfig = value; });
       }));
+
+    new Setting(section)
+      .setName("Restore deleted files")
+      .setDesc("Something went missing? Pick a time and bring back everything that was deleted since then, from the Nextcloud trash bin and from the copies kept on this device, with one tap.")
+      .addButton((button) => button.setButtonText("Restore…").setCta().onClick(() => { new RecoveryModal(this.app, this.owner).open(); }));
 
     new Setting(section)
       .setName("Publish this vault")
@@ -335,7 +353,7 @@ export class NyraNextcloudSyncSettingTab extends PluginSettingTab {
 
     new Setting(section)
       .setName("Approve held deletions automatically")
-      .setDesc("A large batch of deletions is held back first. If it stays unchanged for 10 minutes and removes at most half of your files, Nyra carries it out on its own. Removed files stay recoverable under Recently deleted and in the Nextcloud trash. Turn off to approve every held batch yourself.")
+      .setDesc("A large batch of deletions is held back first. If it only removes files from this device, stays unchanged for 10 minutes and covers at most a tenth of your files, Nyra carries it out on its own. Deleting files on Nextcloud, or anything that looks like a whole vault vanished, always waits for you. Removed files stay recoverable. Turn off to approve every held batch yourself.")
       .addToggle((toggle) => toggle.setValue(this.owner.settings.autoApproveHeldDeletions).setDisabled(busy).onChange((value) => {
         return this.updateAndDisplay((settings) => { settings.autoApproveHeldDeletions = value; });
       }));

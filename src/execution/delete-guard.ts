@@ -7,6 +7,9 @@ export interface DeleteGuardInput {
   trackedFiles: number;
   /** Deletions the user already approved for the next sync. */
   approvedItems: number;
+  /** Tracked files this device currently has / Nextcloud currently has; zero with a populated history means the side looks wiped. */
+  localReplicas?: number;
+  remoteReplicas?: number;
 }
 
 export interface DeleteGuardDecision {
@@ -17,6 +20,11 @@ export interface DeleteGuardDecision {
   total: number;
   /** Up to ten affected paths for the approval prompt. */
   sample: string[];
+  /**
+   * Why the batch looks like an accident rather than an edit: one whole side of the vault is gone. Such a
+   * batch is never released automatically; only an explicit user approval lets it through.
+   */
+  suspicious: "local-vault-empty" | "remote-vault-empty" | null;
 }
 
 const MIN_FRACTION_COUNT = 5;
@@ -39,6 +47,12 @@ export function evaluateDeleteGuard(plan: SyncPlan, input: DeleteGuardInput): De
   const total = localDeletes + remoteDeletes;
   const overThreshold = input.threshold > 0 && total > input.threshold;
   const mostOfVault = total >= MIN_FRACTION_COUNT && input.trackedFiles > 0 && total > input.trackedFiles * FRACTION;
-  const held = total > 0 && (overThreshold || mostOfVault) && total > input.approvedItems;
-  return { held, localDeletes, remoteDeletes, total, sample };
+  // Deleting the other side's files because this side shows nothing is how a failed read (an unmounted or
+  // wiped vault, an empty listing) turns into data loss. Hold that at any size, small vaults included.
+  const suspicious: DeleteGuardDecision["suspicious"] =
+    input.trackedFiles > 0 && input.localReplicas === 0 && remoteDeletes > 0 ? "local-vault-empty"
+      : input.trackedFiles > 0 && input.remoteReplicas === 0 && localDeletes > 0 ? "remote-vault-empty"
+        : null;
+  const held = total > 0 && (overThreshold || mostOfVault || suspicious !== null) && total > input.approvedItems;
+  return { held, localDeletes, remoteDeletes, total, sample, suspicious };
 }

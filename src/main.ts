@@ -18,13 +18,13 @@ import { createRedactedSupportReport } from "./diagnostics/support-report";
 import { LocalTransactionalMutator } from "./execution/local-mutator";
 import { RemoteTransactionalMutator } from "./execution/remote-mutator";
 import { TransactionalSyncExecutor } from "./execution/executor";
-import { DeletionHold, type PendingDeletions } from "./execution/deletion-hold";
+import { DeletionHold, type PendingDeletions, type ReplicaCounts } from "./execution/deletion-hold";
 import type { ExecutionMode, ExecutionReport, ExecutionRuntimeSummary } from "./execution/types";
 import { DeletionLedger, type DeletedFileRecord } from "./recovery/deletion-ledger";
 import { NextcloudTrash, type TrashedItem } from "./recovery/nextcloud-trash";
 import { NextcloudVersions, type FileVersion } from "./recovery/file-versions";
 import { HistoryService } from "./recovery/history-service";
-import { RecoveryService } from "./recovery/recovery-service";
+import { RecoveryService, type RestorePreview, type RestoreSinceReport } from "./recovery/recovery-service";
 import { basicAuthorization } from "./security/base64";
 import { ServerHealthMonitor } from "./health/monitor";
 import type { ServerHealthSnapshot } from "./health/types";
@@ -66,6 +66,7 @@ import { TransferJournalStore } from "./transfer/journal";
 import { NyraNextcloudSyncSettingTab } from "./ui/settings-tab";
 import { platformCapabilities } from "./platform/capabilities";
 import { SyncWakeLock } from "./platform/sync-wake-lock";
+import { runStorageSelfTest, type StorageCheck } from "./platform/storage-selftest";
 import { createAppLocalDeviceScope, getPluginDeviceRuntimeRoot } from "./platform/device-scope";
 import { acquireRuntimeWriterLease, getRuntimeLockManager, type RuntimeWriterLease } from "./platform/runtime-writer-lease";
 import { resolveRuntimeScope, runtimeScopeIdentity } from "./platform/runtime-scope-binding";
@@ -75,9 +76,9 @@ import { recordIsInScope } from "./planner/planner";
 import { listSyncTreeChildren, type SyncTreeListing, type SyncTreeSources } from "./folders/sync-tree";
 import { setIncluded } from "./local/selection";
 
-/** Held bulk deletions release themselves after this wait if they stay at or below this share of tracked files. */
+/** Held bulk deletions release themselves after this wait if they only remove files from this device and stay at or below this share of tracked files. */
 const AUTO_APPROVE_DELETIONS_GRACE_MS = 10 * 60_000;
-const AUTO_APPROVE_DELETIONS_MAX_SHARE = 0.5;
+const AUTO_APPROVE_DELETIONS_MAX_SHARE = 0.1;
 
 const FAST_REMOTE_FENCE_MS = 5 * 60_000;
 
@@ -490,12 +491,31 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
       if (health.state !== "online") throw new Error(`Nextcloud is ${health.state}. Download is paused until the server is online.`);
       const localOutcome = await this.scanLocalVaultInternal("download-preflight");
       const remoteOutcome = await this.scanRemoteVaultInternal();
-      const plan = await this.buildSyncPlanInternal();
       const localFiles = localOutcome.scan.kind === "full" ? localOutcome.scan.entries.length : 0;
+      // An empty device that still remembers files must not read that as "I deleted everything": forget those
+      // stale local histories first so Nextcloud's copies are planned as plain downloads.
+      if (localFiles === 0 && localOutcome.scan.complete) await this.reseedMissingLocalRecords();
+      const plan = await this.buildSyncPlanInternal();
       const assessment = assessBootstrapPlan(plan, localFiles, remoteOutcome.scan.entries.length);
       if (!assessment.canDownload) throw new Error(assessment.downloadReason);
       return await this.applyCurrentSyncPlanInternal(false, "bootstrap-pull");
     });
+  }
+
+  /** Turns records that have a Nextcloud copy but no local copy into plain remote files without any deletion intent. */
+  private async reseedMissingLocalRecords(): Promise<number> {
+    const store = this.durableState;
+    if (!store) return 0;
+    const stale = Object.values(store.getState().files).filter((record) => record.local === null && record.remote !== null);
+    if (stale.length === 0) return 0;
+    await store.transact("download-reseed-missing-local", (tx, base) => {
+      for (const record of stale) {
+        tx.putFile({ entryId: record.entryId, path: record.remote?.path ?? record.path, baseline: null, local: null, remote: record.remote, status: "remote-dirty" });
+        for (const tombstone of Object.values(base.tombstones)) if (tombstone.entryId === record.entryId) tx.removeTombstone(tombstone.tombstoneId);
+      }
+    });
+    this.logger.warn("download.reseeded-missing-local", { records: stale.length });
+    return stale.length;
   }
 
   async assessCrossDeviceSetup(): Promise<BootstrapAssessment> {
@@ -898,7 +918,7 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
     // Explicit conflict choices and bootstrap runs are user-directed; only automatic cycles are guarded.
     let approvalInForce = false;
     if (allowDestructive && !planOverride && mode === "bidirectional") {
-      const evaluation = this.deletionHold.evaluate(plan, settings.deleteConfirmThreshold, Object.keys(this.durableState.getState().files).length);
+      const evaluation = this.deletionHold.evaluate(plan, settings.deleteConfirmThreshold, Object.keys(this.durableState.getState().files).length, this.replicaCounts());
       if (evaluation.decision.held) {
         allowDestructive = false;
         this.announceHeldDeletions(evaluation.newlyHeld);
@@ -1038,6 +1058,26 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
     return path;
   }
 
+  /** Checks this device's file layer (write/read-back, append, rename, hidden files, mtime) in a scratch folder. */
+  async runStorageSelfTest(): Promise<StorageCheck[]> {
+    const scope = this.requireDeviceScope();
+    return await runStorageSelfTest(this.app.vault.adapter, `${getPluginDeviceRuntimeRoot(this.app.vault.configDir, this.manifest.id, scope)}/selftest`);
+  }
+
+  async previewRestoreSince(since: Date): Promise<RestorePreview> {
+    if (!this.recovery) throw new Error(this.stateInitializationError ?? "Recovery is unavailable.");
+    return await this.recovery.previewSince(since);
+  }
+
+  /** One click: brings back everything deleted since `since`, then lets sync pick the files up. */
+  async restoreDeletedSince(since: Date): Promise<RestoreSinceReport> {
+    const recovery = this.recovery;
+    if (!recovery) throw new Error(this.stateInitializationError ?? "Recovery is unavailable.");
+    const report = await this.runManualOperation(async () => await recovery.restoreSince(since));
+    this.autoSync?.noteForegroundResume();
+    return report;
+  }
+
   async listNextcloudTrash(): Promise<TrashedItem[]> {
     if (!this.recovery) throw new Error(this.stateInitializationError ?? "Recovery is unavailable.");
     return await this.recovery.listTrash();
@@ -1070,14 +1110,33 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
           return new NextcloudTrash(this.http, account.serverUrl, account.userId, basicAuthorization(credentials.loginName, credentials.appPassword));
         } catch { return null; }
       },
-      remoteRoot: () => this.settings.remoteRootPath
+      remoteRoot: () => this.settings.remoteRootPath,
+      ensureRemoteFolders: async (folders) => {
+        const settings = structuredClone(this.settings);
+        const account = settings.account;
+        if (!account || settings.connectionState !== "verified") throw new Error("Connect to Nextcloud first.");
+        const remote = await this.createRemoteMutator(settings);
+        const base = appendWebdavPath(account.webdavRootUrl, settings.remoteRootPath);
+        for (const folder of folders) await remote.ensureDirectoryPath(base, folder);
+      }
     });
+  }
+
+  /** How many tracked files currently have a local / a Nextcloud copy, from the durable replica records. */
+  private replicaCounts(): ReplicaCounts {
+    let localReplicas = 0;
+    let remoteReplicas = 0;
+    for (const record of Object.values(this.durableState?.getState().files ?? {})) {
+      if (record.local) localReplicas += 1;
+      if (record.remote) remoteReplicas += 1;
+    }
+    return { localReplicas, remoteReplicas };
   }
 
   private refreshDeletionHold(plan: SyncPlan): void {
     if (!this.durableState) return;
     if (!this.settings.autoSyncAllowDeletes) { this.deletionHold.reset(); return; }
-    const evaluation = this.deletionHold.evaluate(plan, this.settings.deleteConfirmThreshold, Object.keys(this.durableState.getState().files).length);
+    const evaluation = this.deletionHold.evaluate(plan, this.settings.deleteConfirmThreshold, Object.keys(this.durableState.getState().files).length, this.replicaCounts());
     const tracked = Object.keys(this.durableState.getState().files).length;
     if (this.settings.autoApproveHeldDeletions && this.deletionHold.autoApprove(AUTO_APPROVE_DELETIONS_GRACE_MS, AUTO_APPROVE_DELETIONS_MAX_SHARE, tracked)) {
       this.logger.info("deletions.auto-approved", { tracked });
@@ -1093,7 +1152,14 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
     if (!pending) return;
     this.logger.warn("deletions.held", { total: pending.total, files: pending.files, folders: pending.folders });
     void this.activity?.add([{ at: new Date().toISOString(), kind: "held-deletions", path: "", detail: `${plural(pending.total, "deletion")} ${isAre(pending.total)} waiting for your approval` }]);
-    if (notify) new Notice(`Nyra is holding ${plural(pending.total, "deletion")} for your approval. Open the Nyra settings to review them.`, 15_000);
+    if (notify) {
+      const message = pending.suspicious === "local-vault-empty"
+        ? `This device looks empty, so Nyra is NOT deleting ${plural(pending.total, "file")} on Nextcloud. To refill this device, open the Nyra settings and tap Download from Nextcloud.`
+        : pending.suspicious === "remote-vault-empty"
+          ? `Nextcloud looks empty, so Nyra is NOT deleting ${plural(pending.total, "file")} on this device. Check the server and the remote folder setting.`
+          : `Nyra is holding ${plural(pending.total, "deletion")} for your approval. Open the Nyra settings to review them.`;
+      new Notice(message, 20_000);
+    }
     this.refreshStatusBar();
   }
 

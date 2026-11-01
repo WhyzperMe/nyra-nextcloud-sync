@@ -11,7 +11,11 @@ export interface PendingDeletions {
   pendingLocalDeletes: number;
   sample: string[];
   detectedAt: string;
+  /** Set when a whole side of the vault looks wiped; such a batch needs a person's explicit approval. */
+  suspicious: DeleteGuardDecision["suspicious"];
 }
+
+export interface ReplicaCounts { localReplicas: number; remoteReplicas: number }
 
 const APPROVAL_TTL_MS = 15 * 60_000;
 
@@ -29,8 +33,8 @@ export class DeletionHold {
   constructor(private readonly now: () => number = Date.now) {}
 
   /** Evaluates a plan and updates the pending state. Returns whether it is newly held. */
-  evaluate(plan: SyncPlan, threshold: number, trackedFiles: number): { decision: DeleteGuardDecision; newlyHeld: boolean } {
-    const decision = evaluateDeleteGuard(plan, { threshold, trackedFiles, approvedItems: this.approvedItems() });
+  evaluate(plan: SyncPlan, threshold: number, trackedFiles: number, sides?: ReplicaCounts): { decision: DeleteGuardDecision; newlyHeld: boolean } {
+    const decision = evaluateDeleteGuard(plan, { threshold, trackedFiles, approvedItems: this.approvedItems(), ...sides });
     const wasHeld = this.fileDecision !== null;
     // An approval belongs to the deletions the user was shown; once they are gone it must not linger.
     if (decision.total === 0 && this.approval && this.folderDeletes === 0) this.approval = null;
@@ -72,7 +76,8 @@ export class DeletionHold {
       pendingRemoteDeletes: this.fileDecision?.remoteDeletes ?? 0,
       pendingLocalDeletes: this.fileDecision?.localDeletes ?? 0,
       sample: this.fileDecision?.sample ?? [],
-      detectedAt: this.detectedAt
+      detectedAt: this.detectedAt,
+      suspicious: this.fileDecision?.suspicious ?? null
     };
   }
 
@@ -86,13 +91,14 @@ export class DeletionHold {
 
   /**
    * Autonomous approval for held deletions. A batch is released only when it has stood unchanged for
-   * `graceMs` (time for a mounted-drive hiccup or an accidental mass delete to show up as something
-   * else) and removes at most `maxShare` of the tracked files; anything larger looks like a disaster
-   * and keeps waiting for a person. Every removed file stays recoverable from retained copies.
+   * `graceMs`, removes at most `maxShare` of the tracked files, never touches Nextcloud (a deletion
+   * there is only ever carried out on a person's say-so) and does not look like a wiped side. Anything
+   * else keeps waiting for a person.
    */
   autoApprove(graceMs: number, maxShare: number, trackedFiles: number): boolean {
     const pending = this.summary();
     if (!pending || this.approvedItems() > 0) return false;
+    if (pending.suspicious !== null || pending.pendingRemoteDeletes > 0) return false;
     if (this.now() - Date.parse(pending.detectedAt) < graceMs) return false;
     if (trackedFiles <= 0 || pending.total > trackedFiles * maxShare) return false;
     return this.approve();

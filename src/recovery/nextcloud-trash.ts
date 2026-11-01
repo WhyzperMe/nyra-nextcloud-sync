@@ -32,7 +32,7 @@ export class NextcloudTrash {
   }
 
   /** Newest first, only items that were deleted from below `rootPath` (the synchronized folder). */
-  async list(rootPath: string): Promise<TrashedItem[]> {
+  async list(rootPath: string, limit = MAX_ITEMS): Promise<TrashedItem[]> {
     const response = await this.request(this.base + "/", "PROPFIND", { Depth: "1" }, PROPFIND, "application/xml; charset=utf-8");
     if (response.status === 404) return [];
     if (response.status !== 207) throw new Error(`Nextcloud trash listing failed with HTTP ${response.status}.`);
@@ -49,7 +49,7 @@ export class NextcloudTrash {
       if (!trashName || !Number.isFinite(seconds)) continue;
       items.push({ trashName, originalLocation: original, isFolder: row.isCollection, size: row.size, deletedAt: new Date(seconds * 1000).toISOString() });
     }
-    return items.sort((a, b) => b.deletedAt.localeCompare(a.deletedAt)).slice(0, MAX_ITEMS);
+    return items.sort((a, b) => b.deletedAt.localeCompare(a.deletedAt)).slice(0, limit);
   }
 
   /**

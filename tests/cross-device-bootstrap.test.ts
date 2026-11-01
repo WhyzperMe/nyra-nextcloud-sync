@@ -59,6 +59,30 @@ describe("Cross-device bootstrap", () => {
     expect(plan.items[0]?.steps.map((step) => step.kind)).toEqual(["download-create", "establish-baseline"]);
   });
 
+  it("shows why an emptied device must forget its stale history before a download is possible", async () => {
+    const hash = "b".repeat(64);
+    const stale = (): FileReplicaRecord => ({
+      ...remoteOnly("Notes/Kept.md"),
+      baseline: { blobHash: hash, size: 1, createdAt: new Date(0).toISOString(), path: "Notes/Kept.md", remoteFileId: "42", remoteEtag: '"etag-1"' },
+      remote: { path: "Notes/Kept.md", contentHash: hash, reportedSha256: null, etag: '"etag-1"', fileId: "42", size: 1, mtimeMs: 1 },
+      status: "pending-delete"
+    });
+    // A device that remembers a file it no longer has plans to delete it on Nextcloud, so a download is refused...
+    const remembering = createEmptyState("store-stale");
+    add(remembering, stale());
+    const stalePlan = await new SyncPlanner().build(remembering);
+    expect(stalePlan.items[0]?.steps.map((step) => step.kind)).toContain("delete-remote");
+    expect(assessBootstrapPlan(stalePlan, 0, 1).canDownload).toBe(false);
+
+    // ...and once that history is forgotten (what the download button now does) it is a plain download.
+    const forgotten = createEmptyState("store-forgotten");
+    const record = stale();
+    add(forgotten, { ...record, baseline: null, status: "remote-dirty" });
+    const plan = await new SyncPlanner().build(forgotten);
+    expect(assessBootstrapPlan(plan, 0, 1).canDownload).toBe(true);
+    expect(plan.items[0]?.steps.map((step) => step.kind)).not.toContain("delete-remote");
+  });
+
   it("refuses first-link shortcuts once both sides contain sync-visible data", async () => {
     const state = createEmptyState("store-stage10-both");
     const local = localOnly("Notes/A.md");

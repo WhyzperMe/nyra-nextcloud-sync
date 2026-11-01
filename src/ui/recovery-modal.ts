@@ -24,6 +24,7 @@ export class RecoveryModal extends Modal {
       cls: "nyra-nc-recovery__hint",
       text: "Files that a sync deleted can be brought back here. Restored files are synced again like any new file."
     });
+    this.renderRestoreAll(contentEl);
     const tabs = contentEl.createDiv({ cls: "nyra-nc-recovery__tabs" });
     const local = tabs.createEl("button", { text: "Deleted by sync" });
     const trash = tabs.createEl("button", { text: "Nextcloud trash bin" });
@@ -36,6 +37,75 @@ export class RecoveryModal extends Modal {
   onClose(): void {
     this.revision += 1;
     this.contentEl.empty();
+  }
+
+  /** Time picker plus one button that restores everything deleted since then. */
+  private renderRestoreAll(parent: HTMLElement): void {
+    const panel = parent.createDiv({ cls: "nyra-nc-recovery__all" });
+    panel.createEl("h3", { text: "Restore everything deleted since…" });
+    const presets: Array<[string, string, number | null]> = [
+      ["hour", "the last hour", 3_600_000], ["six", "the last 6 hours", 6 * 3_600_000], ["day", "the last 24 hours", 24 * 3_600_000],
+      ["week", "the last 7 days", 7 * 24 * 3_600_000], ["month", "the last 30 days", 30 * 24 * 3_600_000], ["custom", "a date and time I choose", null]
+    ];
+    const select = panel.createEl("select", { cls: "dropdown" });
+    for (const [value, label] of presets) { const option = select.createEl("option", { text: label }); option.value = value; }
+    select.value = "day";
+    const custom = panel.createEl("input");
+    custom.type = "datetime-local";
+    custom.addClass("nyra-nc-recovery__when");
+    custom.style.display = "none";
+    const summary = panel.createDiv({ cls: "nyra-nc-recovery__meta", text: "" });
+    const button = panel.createEl("button", { text: "Restore everything", cls: "mod-cta" });
+    let revision = 0;
+    let since: Date | null = null;
+
+    const pickSince = (): Date | null => {
+      const preset = presets.find(([value]) => value === select.value);
+      if (preset && preset[2] !== null) return new Date(Date.now() - preset[2]);
+      const parsed = custom.value ? new Date(custom.value) : null;
+      return parsed && Number.isFinite(parsed.getTime()) ? parsed : null;
+    };
+    const refresh = (): void => {
+      custom.style.display = select.value === "custom" ? "" : "none";
+      since = pickSince();
+      const mine = ++revision;
+      button.disabled = true;
+      if (!since) { summary.setText("Choose a date and time."); return; }
+      summary.setText("Counting…");
+      this.owner.previewRestoreSince(since).then((preview) => {
+        if (mine !== revision) return;
+        const total = preview.trashItems + preview.localCopies;
+        summary.setText(total === 0
+          ? "Nothing to restore for this time."
+          : `${preview.trashItems} in the Nextcloud trash bin · ${preview.localCopies} kept on this device`);
+        button.disabled = total === 0;
+      }).catch((error: unknown) => {
+        if (mine !== revision) return;
+        summary.setText(`Could not count: ${errorMessage(error)}`);
+        button.disabled = false;
+      });
+    };
+    select.addEventListener("change", refresh);
+    custom.addEventListener("change", refresh);
+    button.addEventListener("click", () => {
+      if (!since) return;
+      const chosen = since;
+      button.disabled = true;
+      button.setText("Restoring…");
+      this.owner.restoreDeletedSince(chosen).then((report) => {
+        const restored = report.trashRestored + report.localRestored;
+        const failed = report.trashFailed + report.localFailed;
+        new Notice(`Restored ${restored} item${restored === 1 ? "" : "s"}${failed > 0 ? ` · ${failed} failed (${report.errors[0] ?? "see the log"})` : ""}. They sync back to this device now.`, 15_000);
+        button.setText("Restore everything");
+        refresh();
+        this.show(this.tab);
+      }).catch((error: unknown) => {
+        new Notice(`Restore failed: ${errorMessage(error)}`, 12_000);
+        button.setText("Restore everything");
+        refresh();
+      });
+    });
+    refresh();
   }
 
   private show(tab: Tab): void {
