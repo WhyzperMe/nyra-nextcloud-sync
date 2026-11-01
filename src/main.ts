@@ -65,6 +65,7 @@ import { SyncOperationGuard } from "./sync/operation-guard";
 import { TransferJournalStore } from "./transfer/journal";
 import { NyraNextcloudSyncSettingTab } from "./ui/settings-tab";
 import { platformCapabilities } from "./platform/capabilities";
+import { SyncWakeLock } from "./platform/sync-wake-lock";
 import { createAppLocalDeviceScope, getPluginDeviceRuntimeRoot } from "./platform/device-scope";
 import { acquireRuntimeWriterLease, getRuntimeLockManager, type RuntimeWriterLease } from "./platform/runtime-writer-lease";
 import { resolveRuntimeScope, runtimeScopeIdentity } from "./platform/runtime-scope-binding";
@@ -74,13 +75,22 @@ import { recordIsInScope } from "./planner/planner";
 import { listSyncTreeChildren, type SyncTreeListing, type SyncTreeSources } from "./folders/sync-tree";
 import { setIncluded } from "./local/selection";
 
+/** Held bulk deletions release themselves after this wait if they stay at or below this share of tracked files. */
+const AUTO_APPROVE_DELETIONS_GRACE_MS = 10 * 60_000;
+const AUTO_APPROVE_DELETIONS_MAX_SHARE = 0.5;
+
 const FAST_REMOTE_FENCE_MS = 5 * 60_000;
 
 export default class NyraNextcloudSyncPlugin extends Plugin {
   settings: PluginSettings = { ...DEFAULT_SETTINGS };
   readonly logger = new ConsoleLogger();
   private readonly settingsMutex = new AsyncMutex();
-  private readonly operationGuard = new SyncOperationGuard();
+  private readonly syncWakeLock = new SyncWakeLock();
+  private readonly operationGuard = new SyncOperationGuard((busy) => {
+    if (!this.platform.isMobile) return;
+    if (busy) this.syncWakeLock.acquire();
+    else this.syncWakeLock.release();
+  });
   private readonly platform = platformCapabilities(Platform.isMobileApp);
   private readonly failedMergeReviews = new Map<string, { fingerprint: string; message: string }>();
 
@@ -319,6 +329,7 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
     this.healthMonitor?.close();
     this.auth?.close();
     this.localWatcher?.onunload();
+    this.syncWakeLock.release();
     void this.finishRuntimeShutdown();
     this.logger.info("plugin.unloaded");
   }
@@ -1067,6 +1078,13 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
     if (!this.durableState) return;
     if (!this.settings.autoSyncAllowDeletes) { this.deletionHold.reset(); return; }
     const evaluation = this.deletionHold.evaluate(plan, this.settings.deleteConfirmThreshold, Object.keys(this.durableState.getState().files).length);
+    const tracked = Object.keys(this.durableState.getState().files).length;
+    if (this.settings.autoApproveHeldDeletions && this.deletionHold.autoApprove(AUTO_APPROVE_DELETIONS_GRACE_MS, AUTO_APPROVE_DELETIONS_MAX_SHARE, tracked)) {
+      this.logger.info("deletions.auto-approved", { tracked });
+      void this.activity?.add([{ at: new Date().toISOString(), kind: "held-deletions", path: "", detail: "Held deletions were approved automatically after a safety wait; removed files stay recoverable" }]);
+      this.autoSync?.noteLocalActivity();
+      return;
+    }
     if (evaluation.newlyHeld && this.settings.autoSyncAllowDeletes) this.announceHeldDeletions(true);
   }
 
@@ -1435,6 +1453,7 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
     };
     this.registerDomEvent(document, "visibilitychange", () => {
       if (document.visibilityState === "visible") {
+        this.syncWakeLock.reacquireIfWanted();
         wake();
       } else {
         // Best effort only: persist queued local observations before suspension;

@@ -26,8 +26,9 @@ export async function writeImmutableText(
   try {
     try {
       await backend.writeText(tempPath, data);
-      const staged = await backend.readText(tempPath);
-      if (staged !== data) throw new Error(`Staged text verification failed for ${finalPath}.`);
+      if (!(await settles(async () => (await backend.readText(tempPath)) === data))) {
+        throw new Error(`Staged text verification failed for ${finalPath}.`);
+      }
 
       if (await backend.exists(finalPath)) {
         const existing = await backend.readText(finalPath);
@@ -36,13 +37,14 @@ export async function writeImmutableText(
       }
 
       await backend.rename(tempPath, finalPath);
-      const committed = await backend.readText(finalPath);
-      if (committed !== data) throw new Error(`Committed text verification failed for ${finalPath}.`);
+      if (!(await settles(async () => (await backend.readText(finalPath)) === data))) {
+        throw new Error(`Committed text verification failed for ${finalPath}.`);
+      }
     } catch (error) {
       // Another writer may have won the final-name race, or the adapter may
       // have thrown after a successful rename. Treat that as success only if
       // the immutable final bytes can be read back and match exactly.
-      if (!(await finalTextMatches(backend, finalPath, data))) throw error;
+      if (!(await settles(async () => await finalTextMatches(backend, finalPath, data)))) throw error;
     }
   } finally {
     await bestEffortRemove(backend, tempPath);
@@ -88,6 +90,23 @@ export async function writeImmutableBinary(
     }
   } finally {
     await bestEffortRemove(backend, tempPath);
+  }
+}
+
+const SETTLE_DELAYS_MS = [25, 75, 200];
+
+/**
+ * Mobile adapters can return a stale or short read immediately after a write. A check that fails is
+ * repeated a few times with growing pauses before it is believed; a check that passes returns at once.
+ */
+async function settles(check: () => Promise<boolean>): Promise<boolean> {
+  for (let attempt = 0; ; attempt += 1) {
+    let ok = false;
+    try { ok = await check(); } catch { ok = false; }
+    if (ok) return true;
+    const delay = SETTLE_DELAYS_MS[attempt];
+    if (delay === undefined) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, delay));
   }
 }
 

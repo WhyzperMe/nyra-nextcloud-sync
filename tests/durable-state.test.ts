@@ -464,26 +464,24 @@ describe("Durable state", () => {
     expect(store.summary().walSequence).toBe(before.walSequence);
   });
 
-  it("fails closed on an unresolved WAL write ambiguity and recovers deterministically on reopen", async () => {
+  it("heals a transient WAL write ambiguity by retrying the identical record", async () => {
     const backend = new AmbiguousCommitBackend();
     const store = await DurableStateStore.open(backend, logger);
 
-    await expect(
-      store.transact("ambiguous-commit", (tx) => {
-        tx.putTombstone({
-          tombstoneId: randomId("tomb"),
-          entryId: randomId("entry"),
-          previousPath: "Ambiguous.md",
-          deletedSide: "local",
-          previousBlobHash: null,
-          previousRemoteFileId: null,
-          createdAt: new Date().toISOString()
-        });
-      })
-    ).rejects.toThrow(/simulated adapter error/);
+    await store.transact("ambiguous-commit", (tx) => {
+      tx.putTombstone({
+        tombstoneId: randomId("tomb"),
+        entryId: randomId("entry"),
+        previousPath: "Ambiguous.md",
+        deletedSide: "local",
+        previousBlobHash: null,
+        previousRemoteFileId: null,
+        createdAt: new Date().toISOString()
+      });
+    });
 
-    expect(store.summary().status).toBe("degraded");
-    await expect(store.transact("must-not-run", () => undefined)).rejects.toThrow(/degraded/i);
+    expect(store.summary().status).toBe("ready");
+    expect(store.summary().tombstones).toBe(1);
 
     const reopened = await DurableStateStore.open(backend, logger);
     expect(reopened.summary().status).toBe("ready");
@@ -494,6 +492,39 @@ describe("Durable state", () => {
     expect(recoveredAgain.summary().generation).toBe(reopened.summary().generation);
     expect(recoveredAgain.summary().walSequence).toBe(reopened.summary().walSequence);
     expect((await recoveredAgain.verifyIntegrity()).ok).toBe(true);
+  });
+
+  it("freezes on a persistent WAL outage and resumes without a plugin reload once storage recovers", async () => {
+    class OutageBackend extends MemoryStateBackend {
+      outage = false;
+      override async writeText(path: string, data: string): Promise<void> {
+        if (this.outage && path.includes("wal/")) throw new Error("simulated storage outage");
+        await super.writeText(path, data);
+      }
+    }
+    const backend = new OutageBackend();
+    const store = await DurableStateStore.open(backend, logger);
+    const tombstone = (previousPath: string) => (tx: Parameters<Parameters<DurableStateStore["transact"]>[1]>[0]) => tx.putTombstone({
+      tombstoneId: randomId("tomb"), entryId: randomId("entry"), previousPath, deletedSide: "local",
+      previousBlobHash: null, previousRemoteFileId: null, createdAt: new Date().toISOString()
+    });
+
+    backend.outage = true;
+    await expect(store.transact("during-outage", tombstone("Outage.md"))).rejects.toThrow(/simulated storage outage/);
+    expect(store.summary().status).toBe("degraded");
+    // Still down: the recovery replay succeeds (reads work) but the write fails again, so it re-freezes.
+    await expect(store.transact("still-down", tombstone("Down.md"))).rejects.toThrow(/simulated storage outage/);
+    expect(store.summary().status).toBe("degraded");
+
+    backend.outage = false;
+    await store.transact("after-outage", tombstone("Healed.md"));
+    expect(store.summary().status).toBe("ready");
+    expect(Object.values(store.getState().tombstones).map((entry) => entry.previousPath)).toEqual(["Healed.md"]);
+    expect((await store.verifyIntegrity()).ok).toBe(true);
+
+    const reopened = await DurableStateStore.open(backend, logger);
+    expect(reopened.summary().generation).toBe(store.summary().generation);
+    expect(reopened.summary().tombstones).toBe(1);
   });
 
   it("rejects a baseline reference whose declared size does not match the immutable object", async () => {

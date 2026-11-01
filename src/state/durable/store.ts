@@ -289,7 +289,7 @@ export class DurableStateStore {
     build: (transaction: DurableTransaction, baseState: Readonly<DurableState>) => void
   ): Promise<DurableState> {
     return await this.mutex.runExclusive(async () => {
-      this.assertWritable();
+      await this.ensureWritable();
       const reason = validateReason(reasonInput);
       const base = this.state;
       const newGeneration = incrementCounter(base.generation);
@@ -688,10 +688,31 @@ export class DurableStateStore {
     if (this.closed) throw new Error("Durable state store is closed.");
   }
 
-  private assertWritable(): void {
+  /**
+   * After an ambiguous WAL write the store freezes. Instead of waiting for a manual plugin reload, replay
+   * the files that are really on disk (exactly what startup does) and resume once that succeeds. Callers
+   * hold the mutex, so no transaction can interleave with the recovery.
+   */
+  private async ensureWritable(): Promise<void> {
     this.assertOpen();
-    if (!this.writable) {
-      throw new Error("Durable state store is degraded after an incomplete WAL write. Reload the plugin to run recovery.");
+    if (this.writable) return;
+    try {
+      const recovered = await recoverExistingState(this.snapshots, this.journal, this.logger, this.generations, this.objects);
+      if (!recovered) throw new Error("No recoverable durable state was found.");
+      this.state = recovered.state;
+      this.journal.initialize(this.state.storeId, this.state.lastWalSequence, this.state.lastWalHash);
+      if (recovered.pendingTransactions.length > 0) await this.abortRecoveredTransactions(recovered.pendingTransactions);
+      this.commitsSinceCheckpoint = CHECKPOINT_EVERY_TRANSACTIONS;
+      this.writable = true;
+      this.logger.warn("state.recovered-in-place", {
+        generation: this.state.generation,
+        pendingTransactions: recovered.pendingTransactions.length
+      });
+    } catch (error) {
+      this.logger.error("state.in-place-recovery-failed", { error: error instanceof Error ? error.message : String(error) });
+      throw new Error(
+        `Durable state store is degraded after an incomplete WAL write and automatic recovery failed (${error instanceof Error ? error.message : String(error)}). Reload the plugin to retry recovery.`
+      );
     }
   }
 }

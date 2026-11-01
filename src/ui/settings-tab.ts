@@ -334,6 +334,13 @@ export class NyraNextcloudSyncSettingTab extends PluginSettingTab {
       }));
 
     new Setting(section)
+      .setName("Approve held deletions automatically")
+      .setDesc("A large batch of deletions is held back first. If it stays unchanged for 10 minutes and removes at most half of your files, Nyra carries it out on its own. Removed files stay recoverable under Recently deleted and in the Nextcloud trash. Turn off to approve every held batch yourself.")
+      .addToggle((toggle) => toggle.setValue(this.owner.settings.autoApproveHeldDeletions).setDisabled(busy).onChange((value) => {
+        return this.updateAndDisplay((settings) => { settings.autoApproveHeldDeletions = value; });
+      }));
+
+    new Setting(section)
       .setName("Pause auto-sync")
       .setDesc("Stops automatic syncing until you resume. Sync now still works. Useful on metered connections or while reorganizing files.")
       .addToggle((toggle) => toggle.setValue(this.owner.settings.syncPaused).setDisabled(busy).onChange((value) => {

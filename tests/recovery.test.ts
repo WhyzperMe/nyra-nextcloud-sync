@@ -151,6 +151,31 @@ describe("deletion hold", () => {
     expect(hold.evaluate(big, 20, 1000).decision.held).toBe(true);
   });
 
+  it("approves held deletions on its own only after the wait and only while the batch stays plausible", async () => {
+    const { DeletionHold } = await import("../src/execution/deletion-hold");
+    const grace = 10 * 60_000;
+    let now = 5_000_000;
+    const hold = new DeletionHold(() => now);
+    const batch = deletes(30);
+    hold.evaluate(batch, 20, 1000);
+
+    expect(hold.autoApprove(grace, 0.5, 1000)).toBe(false); // just detected
+    now += grace - 1;
+    expect(hold.autoApprove(grace, 0.5, 1000)).toBe(false);
+    now += 1;
+    expect(hold.autoApprove(grace, 0.5, 1000)).toBe(true);
+    expect(hold.approvedItems()).toBe(30);
+    expect(hold.autoApprove(grace, 0.5, 1000)).toBe(false); // already approved
+    expect(hold.evaluate(batch, 20, 1000).decision.held).toBe(false);
+
+    const mass = new DeletionHold(() => now);
+    mass.evaluate(deletes(30), 20, 40); // 75% of a 40-file vault looks like a disaster
+    now += grace * 2;
+    expect(mass.autoApprove(grace, 0.5, 40)).toBe(false);
+    expect(mass.summary()).not.toBeNull();
+    expect(new DeletionHold(() => now).autoApprove(grace, 0.5, 1000)).toBe(false); // nothing pending
+  });
+
   it("counts held folder removals and reports nothing when idle", async () => {
     const { DeletionHold } = await import("../src/execution/deletion-hold");
     const hold = new DeletionHold();

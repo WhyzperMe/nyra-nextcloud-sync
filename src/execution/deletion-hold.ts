@@ -84,6 +84,20 @@ export class DeletionHold {
     return true;
   }
 
+  /**
+   * Autonomous approval for held deletions. A batch is released only when it has stood unchanged for
+   * `graceMs` (time for a mounted-drive hiccup or an accidental mass delete to show up as something
+   * else) and removes at most `maxShare` of the tracked files; anything larger looks like a disaster
+   * and keeps waiting for a person. Every removed file stays recoverable from retained copies.
+   */
+  autoApprove(graceMs: number, maxShare: number, trackedFiles: number): boolean {
+    const pending = this.summary();
+    if (!pending || this.approvedItems() > 0) return false;
+    if (this.now() - Date.parse(pending.detectedAt) < graceMs) return false;
+    if (trackedFiles <= 0 || pending.total > trackedFiles * maxShare) return false;
+    return this.approve();
+  }
+
   /** Called after a sync ran with an approval in force. */
   consumeApproval(): void {
     this.approval = null;

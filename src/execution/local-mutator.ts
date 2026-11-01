@@ -140,45 +140,18 @@ export class LocalTransactionalMutator {
 
   async prepareSnapshot(pathInput: string, expectedHash: string, chunkSize: number): Promise<PreparedLocalSnapshot> {
     if (!Number.isSafeInteger(chunkSize) || chunkSize <= 0) throw new Error("Snapshot chunk size must be a positive safe integer.");
+    // The whole file was just read and hashed (readVerified), so those bytes already are a stable,
+    // verified copy. Writing them to disk and reading them back only added mobile-adapter failure
+    // modes (short or stale reads right after a write) without any extra safety.
     const verified = await this.readVerified(pathInput, expectedHash);
-    const snapshotId = randomId("snapshot");
-    const dir = `${this.snapshotDir}/${snapshotId}`;
-    await this.mkdirp(dir);
-    const chunkCount = Math.max(1, Math.ceil(verified.size / chunkSize));
-    const hasher = new IncrementalSha256();
-    try {
-      if (verified.size === 0) {
-        const empty = new ArrayBuffer(0);
-        await this.adapter.writeBinary(`${dir}/00000.bin`, empty);
-        hasher.update(empty);
-      } else {
-        const bytes = new Uint8Array(verified.bytes);
-        for (let index = 0; index < chunkCount; index += 1) {
-          const bounds = chunkBounds(index, verified.size, chunkSize);
-          const copy = new Uint8Array(bounds.size);
-          copy.set(bytes.subarray(bounds.start, bounds.endExclusive));
-          const chunk = copy.buffer;
-          const path = `${dir}/${String(index).padStart(5, "0")}.bin`;
-          await this.adapter.writeBinary(path, chunk);
-          const readBack = await this.adapter.readBinary(path);
-          if (readBack.byteLength !== bounds.size) throw new Error("Local transfer snapshot chunk failed size verification.");
-          hasher.update(readBack);
-        }
-      }
-      if (hasher.digestHex() !== expectedHash) throw new Error("Local transfer snapshot failed SHA-256 verification.");
-      const after = await this.adapter.stat(verified.path);
-      if (!after || after.type !== "file" || after.size !== verified.size || after.mtime !== verified.mtimeMs) {
-        throw new Error(`Local source '${verified.path}' changed while the transfer snapshot was being prepared.`);
-      }
-      return new AdapterPreparedSnapshot(
-        this.adapter, dir, snapshotId, verified.path, expectedHash, verified.size, verified.mtimeMs, chunkSize, chunkCount,
-        async () => this.assertSourceStillMatches(verified.path, expectedHash, verified.size, verified.mtimeMs),
-        async () => this.removeSnapshotDirectory(dir, snapshotId)
-      );
-    } catch (error) {
-      await this.removeSnapshotDirectory(dir, snapshotId);
-      throw error;
+    const after = await this.adapter.stat(verified.path);
+    if (!after || after.type !== "file" || after.size !== verified.size || after.mtime !== verified.mtimeMs) {
+      throw new Error(`Local source '${verified.path}' changed while the transfer snapshot was being prepared.`);
     }
+    return new MemoryPreparedSnapshot(
+      randomId("snapshot"), verified.path, expectedHash, verified.bytes, verified.mtimeMs, chunkSize,
+      async () => this.assertSourceStillMatches(verified.path, expectedHash, verified.size, verified.mtimeMs)
+    );
   }
 
   async writeAtomic(targetInput: string, bytes: ArrayBuffer, expectedCurrentHash: string | null): Promise<LocalWriteResult> {
@@ -224,7 +197,12 @@ export class LocalTransactionalMutator {
       if (writtenSize !== desiredSize) throw new Error(`Local staging size mismatch: expected ${desiredSize}, wrote ${writtenSize}.`);
       if (desiredHash !== null && stagedHash !== desiredHash) throw new Error("Local staging SHA-256 verification failed.");
       committedHash = stagedHash;
-      const stagedStat = await this.adapter.stat(stagingPath);
+      let stagedStat = await this.adapter.stat(stagingPath);
+      for (const delay of [25, 75, 200]) {
+        if (stagedStat && stagedStat.type === "file" && stagedStat.size === desiredSize) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        stagedStat = await this.adapter.stat(stagingPath);
+      }
       if (!stagedStat || stagedStat.type !== "file" || stagedStat.size !== desiredSize) throw new Error("Local staging postcondition failed.");
 
       manifest = {
@@ -772,28 +750,32 @@ function directChildName(directory: string, path: string): string | null {
   return name && !name.includes("/") ? name : null;
 }
 
-class AdapterPreparedSnapshot implements PreparedLocalSnapshot {
+/** Hash-verified in-memory copy of a local file, handed out as exact-size chunks on demand. */
+class MemoryPreparedSnapshot implements PreparedLocalSnapshot {
+  readonly size: number;
+  readonly chunkCount: number;
+  private bytes: ArrayBuffer | null;
+
   constructor(
-    private readonly adapter: DataAdapter,
-    private readonly dir: string,
     readonly snapshotId: string,
     readonly path: string,
     readonly contentHash: string,
-    readonly size: number,
+    bytes: ArrayBuffer,
     readonly mtimeMs: number,
     readonly chunkSize: number,
-    readonly chunkCount: number,
-    private readonly verifySource: () => Promise<void>,
-    private readonly cleanupImpl: () => Promise<void>
-  ) {}
+    private readonly verifySource: () => Promise<void>
+  ) {
+    this.bytes = bytes;
+    this.size = bytes.byteLength;
+    this.chunkCount = Math.max(1, Math.ceil(this.size / chunkSize));
+  }
 
   async readChunk(index: number): Promise<ArrayBuffer> {
     if (!Number.isSafeInteger(index) || index < 0 || index >= this.chunkCount) throw new Error("Snapshot chunk index is out of range.");
-    const path = `${this.dir}/${String(index).padStart(5, "0")}.bin`;
-    const bytes = await this.adapter.readBinary(path);
-    const expected = this.size === 0 ? 0 : chunkBounds(index, this.size, this.chunkSize).size;
-    if (bytes.byteLength !== expected) throw new Error(`Snapshot chunk ${index} has an unexpected size.`);
-    return bytes;
+    if (!this.bytes) throw new Error("Snapshot was already released.");
+    if (this.size === 0) return new ArrayBuffer(0);
+    const bounds = chunkBounds(index, this.size, this.chunkSize);
+    return this.bytes.slice(bounds.start, bounds.endExclusive);
   }
 
   async *chunks(): AsyncIterable<ArrayBuffer> {
@@ -801,7 +783,7 @@ class AdapterPreparedSnapshot implements PreparedLocalSnapshot {
   }
 
   async assertSourceUnchanged(): Promise<void> { await this.verifySource(); }
-  async cleanup(): Promise<void> { await this.cleanupImpl(); }
+  async cleanup(): Promise<void> { this.bytes = null; }
 }
 
 async function* singleChunk(bytes: ArrayBuffer): AsyncIterable<ArrayBuffer> { yield bytes; }

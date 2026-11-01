@@ -5,6 +5,8 @@ export class SyncOperationGuard {
   private owner: SyncOperationOwner | null = null;
   private idleWaiters: Array<() => void> = [];
 
+  constructor(private readonly onBusyChange?: (busy: boolean) => void) {}
+
   currentOwner(): SyncOperationOwner | null { return this.owner; }
   isBusy(): boolean { return this.owner !== null; }
   isOwnedBy(owner: SyncOperationOwner): boolean { return this.owner === owner; }
@@ -17,15 +19,21 @@ export class SyncOperationGuard {
   tryAcquire(owner: SyncOperationOwner): (() => void) | null {
     if (this.owner !== null) return null;
     this.owner = owner;
+    this.notifyBusy(true);
     let released = false;
     return () => {
       if (released) return;
       if (this.owner !== owner) throw new Error(`Sync operation reservation for '${owner}' was replaced before release.`);
       released = true;
       this.owner = null;
+      this.notifyBusy(false);
       const waiters = this.idleWaiters;
       this.idleWaiters = [];
       for (const resolve of waiters) resolve();
     };
+  }
+
+  private notifyBusy(busy: boolean): void {
+    try { this.onBusyChange?.(busy); } catch { /* a lifecycle hook must never break the reservation */ }
   }
 }

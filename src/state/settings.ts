@@ -58,6 +58,8 @@ export interface PluginSettings {
   autoMergeText: boolean;
   /** Resolve conflicts on their own (newer wins, the other version is kept as a conflict copy; changes beat deletions). */
   autoResolveConflicts: boolean;
+  /** Approve held bulk deletions on their own once they have stood unchanged for a while and stay plausible. */
+  autoApproveHeldDeletions: boolean;
   /** Maximum bytes per BASE/LOCAL/REMOTE version considered for automatic text merge. */
   autoMergeMaxMiB: number;
   serverHealthCheckSeconds: number;
@@ -92,6 +94,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   fastRemoteCheck: true,
   autoMergeText: true,
   autoResolveConflicts: true,
+  autoApproveHeldDeletions: true,
   autoMergeMaxMiB: 16,
   serverHealthCheckSeconds: 60,
   connectionState: "disconnected",
@@ -146,6 +149,7 @@ export function normalizeSettings(raw: unknown): PluginSettings {
     // boolean remains authoritative, including an explicit legacy opt-out.
     autoMergeText: upgrade || typeof raw.autoMergeText !== "boolean" ? inferLegacyAutoMergeDefault() : raw.autoMergeText,
     autoResolveConflicts: typeof raw.autoResolveConflicts === "boolean" ? raw.autoResolveConflicts : DEFAULT_SETTINGS.autoResolveConflicts,
+    autoApproveHeldDeletions: typeof raw.autoApproveHeldDeletions === "boolean" ? raw.autoApproveHeldDeletions : DEFAULT_SETTINGS.autoApproveHeldDeletions,
     // 2 was the old default (and the old ceiling was 4); large drawings need more room, so it now defaults to 16.
     autoMergeMaxMiB: raw.autoMergeMaxMiB === 2 ? DEFAULT_SETTINGS.autoMergeMaxMiB : safeInteger(raw.autoMergeMaxMiB, 1, 128, DEFAULT_SETTINGS.autoMergeMaxMiB),
     serverHealthCheckSeconds: safeInteger(raw.serverHealthCheckSeconds, 30, 900, DEFAULT_SETTINGS.serverHealthCheckSeconds),

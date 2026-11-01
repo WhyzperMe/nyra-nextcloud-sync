@@ -83,6 +83,7 @@ describe("Multi-device convergence regression", () => {
     expect(dec.decode(localBytes)).toBe("A\nLOCAL\nC\nREMOTE\n");
 
     // A new process replays the WAL and closes the interrupted transaction.
+    backend.failNextCommit = false;
     store = await DurableStateStore.open(backend, logger);
     const recovered = store.getState().files.file_merge_restart!;
     expect(recovered.baseline?.blobHash).toBe(baseHash);
@@ -217,8 +218,9 @@ class CommitFailingMemoryBackend extends MemoryStateBackend {
   override async rename(from: string, to: string): Promise<void> {
     if (this.failNextCommit && to.startsWith("wal/") && to.endsWith(".wal.json")) {
       const staged = JSON.parse(await this.readText(from)) as { event?: { kind?: string } };
+      // Persistent outage: the WAL layer retries transient errors, so only a failure that
+      // outlasts every retry reaches the caller.
       if (staged.event?.kind === "transaction-commit") {
-        this.failNextCommit = false;
         throw new Error("simulated durable commit failure after merged replica writes");
       }
     }

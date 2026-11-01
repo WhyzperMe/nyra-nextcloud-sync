@@ -319,6 +319,42 @@ describe("Adversarial local ambiguous completion", () => {
     expect(await adapter.exists(manifestPath)).toBe(true);
   });
 
+  it("prepares exact-size upload chunks without writing to storage, even when the adapter reads short after writes", async () => {
+    class ShortReadAdapter extends MemoryVaultAdapter {
+      override async readBinary(path: string): Promise<ArrayBuffer> {
+        const bytes = await super.readBinary(path);
+        // Android-style defect: anything under the runtime folder comes back truncated.
+        return path.includes("/runtime/") && bytes.byteLength > 1 ? bytes.slice(0, bytes.byteLength - 1) : bytes;
+      }
+    }
+    const adapter = new ShortReadAdapter();
+    const data = new Uint8Array(1000).map((_, index) => index % 251);
+    await adapter.writeBinary("Big.bin", data.buffer);
+    const hash = await sha256Hex(data.buffer);
+    const mutator = new LocalTransactionalMutator(makeMemoryVault(adapter), "nyra-nextcloud-sync", logger, DEVICE_SCOPE);
+    await mutator.initializeAndRecover();
+
+    const snapshot = await mutator.prepareSnapshot("Big.bin", hash, 300);
+    expect(snapshot.chunkCount).toBe(4);
+    const sizes: number[] = [];
+    const joined = new Uint8Array(1000);
+    let offset = 0;
+    for await (const chunk of snapshot.chunks()) {
+      sizes.push(chunk.byteLength);
+      joined.set(new Uint8Array(chunk), offset);
+      offset += chunk.byteLength;
+    }
+    expect(sizes).toEqual([300, 300, 300, 100]);
+    expect(await sha256Hex(joined.buffer)).toBe(hash);
+    await snapshot.assertSourceUnchanged();
+    await snapshot.cleanup();
+    await expect(snapshot.readChunk(0)).rejects.toThrow(/released/);
+
+    const empty = await (async () => { await adapter.writeBinary("Empty.md", new ArrayBuffer(0)); return await mutator.prepareSnapshot("Empty.md", await sha256Hex(new ArrayBuffer(0)), 1); })();
+    expect(empty.chunkCount).toBe(1);
+    expect((await empty.readChunk(0)).byteLength).toBe(0);
+  });
+
   it("cleans only recognized abandoned staging and snapshot entries while preserving unknown evidence", async () => {
     const adapter = new MemoryVaultAdapter();
     const runtime = `.obsidian/plugins/nyra-nextcloud-sync/runtime/${DEVICE_SCOPE}`;

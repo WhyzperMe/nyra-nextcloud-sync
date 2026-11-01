@@ -97,7 +97,10 @@ export class WalJournal {
     const finalPath = `${WAL_DIR}/${fileName}`;
     const serialized = canonicalStringify(record);
     try {
-      await writeImmutableText(this.backend, finalPath, serialized);
+      // The final name is derived from the record, so rewriting the identical record is idempotent.
+      // Mobile adapters fail transiently (app suspended mid-write, short reads), so retry before
+      // concluding anything about the write.
+      await retryTransient(async () => await writeImmutableText(this.backend, finalPath, serialized));
     } catch (error) {
       // A storage adapter can report an error after the rename reached stable
       // storage. Resolve that ambiguity once. If the exact record cannot be
@@ -173,6 +176,21 @@ export class WalJournal {
       if (!Number.isSafeInteger(total)) return null;
     }
     return total;
+  }
+}
+
+const TRANSIENT_RETRY_DELAYS_MS = [40, 160, 480];
+
+async function retryTransient(operation: () => Promise<void>): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await operation();
+      return;
+    } catch (error) {
+      const delay = TRANSIENT_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    }
   }
 }
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.21.0
+
+**Phone sync no longer stops with "Local transfer snapshot chunk failed size verification" or "Durable state store is degraded".**
+
+- **Uploads no longer round-trip through phone storage.** Before an upload Nyra copied the file in chunks into a temporary folder and read each chunk back. On Android the read-back can come back short right after a write, which aborted the sync. The verified bytes are already in memory, so the upload now takes its chunks straight from them: no extra writes, no read-back, same SHA-256 checks.
+- **The state store heals itself.** A failed state write used to freeze the store until the plugin was reloaded. Writes are now retried (the identical record, so nothing can fork), read-after-write checks wait briefly for slow phone storage before they are believed, and if the store still freezes it replays what is really on disk and resumes by itself on the next change. Reloading is only needed if that replay itself fails.
+- **Held deletions release themselves.** New setting **Approve held deletions automatically** (on by default): a large batch of deletions is still held first, but if it stays unchanged for 10 minutes and removes at most half of the tracked files, Nyra carries it out. Bigger batches keep waiting for you. Everything stays recoverable under Recently deleted and in the Nextcloud trash.
+- **Fewer interruptions on phones.** While a sync is running the screen is kept awake (best effort), because Android freezes Obsidian soon after the screen turns off and can cut a transfer or a write in half. Syncing continues the moment you return to Obsidian. Android does not let Obsidian run reliably with the screen off; this cannot be changed by a plugin.
+- 8 new tests: short-read phone storage, retry and in-place recovery of the state store, automatic deletion approval, the wake lock.
+
 ## 0.20.0
 
 **Huge notes and drawings merge instead of stopping at "Automatic merge is limited to 2097152 bytes per version".**
