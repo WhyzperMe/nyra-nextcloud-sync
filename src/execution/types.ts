@@ -4,7 +4,7 @@ import type { TextMergeLimits } from "../merge/types";
 export type ExecutionStatus = "idle" | "preparing" | "running" | "completed" | "blocked" | "failed" | "closed";
 export type ExecutionStepStatus = "pending" | "running" | "completed" | "skipped" | "blocked" | "failed";
 
-export type ExecutionMode = "bidirectional" | "bootstrap-push" | "bootstrap-pull";
+export type ExecutionMode = "bidirectional" | "bootstrap-push" | "bootstrap-pull" | "emergency-push";
 
 export interface ExecutionPolicy {
   allowDestructive: boolean;

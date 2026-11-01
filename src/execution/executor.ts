@@ -440,6 +440,7 @@ function stepAllowedInMode(kind: SyncPlanStep["kind"], mode: ExecutionMode): boo
   if (mode === "bidirectional") return true;
   if (kind === "verify-remote-content" || kind === "establish-baseline") return true;
   if (mode === "bootstrap-push") return kind === "upload-create";
+  if (mode === "emergency-push") return kind === "upload-create" || kind === "upload-update";
   if (mode === "bootstrap-pull") return kind === "download-create";
   return false;
 }

@@ -412,3 +412,5 @@
   .nyra-nc-feed__row[role="button"] { min-height: 44px; }
   .nyra-nc-detail__copy { min-height: 40px; }
 }
+.nyra-nc-confirm__row { display: flex; gap: var(--size-4-3); margin-top: var(--size-4-4); }
+.nyra-nc-confirm__row button { flex: 1; min-height: 44px; }

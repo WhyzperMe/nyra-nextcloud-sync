@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.25.0
+
+**"Upload everything" is now a real emergency button.**
+
+- **Why it said "Publish blocked".** The old button only worked on a brand-new device facing an empty Nextcloud with no history. A device that remembered its files as synced (your iPad) reads a wiped Nextcloud as "the other side deleted everything", so the button refused. It is rewritten for exactly this situation.
+- **What it does now.** One tap (after a confirmation) makes Nextcloud match this device: every file this device has and Nextcloud lacks is uploaded; a different Nextcloud copy is replaced unless it is clearly newer (Nextcloud keeps the previous version, and a clearly newer one is left to the normal sync, which keeps both versions). Files already identical are only recorded. **Nothing is deleted on either side and nothing is downloaded.** Nextcloud-only files are untouched.
+- **It survives problems.** Uploads run in committed batches of 40, so progress is kept if something stops. A file that fails is retried alone, reported by name and skipped, and the rest continue. The result sentence says how many files were uploaded, replaced, already identical and left to normal sync.
+- **It refuses unsafe starts.** No upload when the local file list or the Nextcloud file list is incomplete, or when this device has no files at all. The stale history of this device's files is forgotten first, so they are never read as deletions.
+- Command palette: "Upload everything from this device to Nextcloud". Settings → Devices → Upload everything.
+- 3 new tests.
+
 ## 0.24.0
 
 **Restored and merged files keep their original names, and the phone no longer stops with "local apply manifest staging verification failed".**

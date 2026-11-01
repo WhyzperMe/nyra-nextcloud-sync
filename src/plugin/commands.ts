@@ -2,6 +2,8 @@ import { Notice } from "obsidian";
 import { errorMessage } from "../core/errors";
 import type NyraNextcloudSyncPlugin from "../main";
 import { RecoveryModal } from "../ui/recovery-modal";
+import { ConfirmModal } from "../ui/confirm-modal";
+import { describeEmergencyUpload } from "../ui/upload-summary";
 import { VersionHistoryModal } from "../ui/version-history-modal";
 import { needs, plural } from "../core/plural";
 
@@ -30,8 +32,14 @@ export function registerCommands(plugin: NyraNextcloudSyncPlugin): void {
     if (!plugin.approvePendingDeletions()) { new Notice("No deletions are waiting for approval."); return; }
     void plugin.runAutoSyncNow().then(() => new Notice("Approved deletions were synced.")).catch((error: unknown) => new Notice(`Sync failed: ${errorMessage(error)}`, 12_000));
   }});
-  plugin.addCommand({ id: "publish-vault-to-nextcloud", name: "Publish this vault to Nextcloud", callback: () => {
-    void plugin.publishVaultToNextcloud().then((report) => new Notice(`Vault published: ${plural(report.completed, "step")}.`)).catch((error: unknown) => new Notice(`Publish blocked: ${errorMessage(error)}`, 12_000));
+  plugin.addCommand({ id: "publish-vault-to-nextcloud", name: "Upload everything from this device to Nextcloud", callback: () => {
+    new ConfirmModal(plugin.app, "Upload everything from this device?", [
+      "Every file on this device that Nextcloud does not have will be uploaded. A different Nextcloud copy is replaced unless it is clearly newer (Nextcloud keeps the old version).",
+      "Nothing is deleted on either side, and nothing is downloaded."
+    ], "Upload everything", (confirmed) => {
+      if (!confirmed) return;
+      void plugin.publishVaultToNextcloud().then((report) => new Notice(describeEmergencyUpload(report), 30_000)).catch((error: unknown) => new Notice(`Upload blocked: ${errorMessage(error)}`, 12_000));
+    }).open();
   }});
   plugin.addCommand({ id: "download-vault-from-nextcloud", name: "Download vault from Nextcloud to this device", callback: () => {
     void plugin.downloadVaultToThisDevice().then((report) => new Notice(`Vault downloaded: ${plural(report.completed, "step")}.`)).catch((error: unknown) => new Notice(`Download blocked: ${errorMessage(error)}`, 12_000));

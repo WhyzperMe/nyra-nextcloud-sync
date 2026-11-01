@@ -1,5 +1,7 @@
 import { Notice, PluginSettingTab, Setting, type App, type TextComponent } from "obsidian";
 import { RecoveryModal } from "./recovery-modal";
+import { ConfirmModal } from "./confirm-modal";
+import { describeEmergencyUpload } from "./upload-summary";
 import { errorMessage } from "../core/errors";
 import { normalizeServerUrl, parseNextcloudLocation } from "../security/url-policy";
 import type NyraNextcloudSyncPlugin from "../main";
@@ -284,13 +286,20 @@ export class NyraNextcloudSyncSettingTab extends PluginSettingTab {
       .addButton((button) => button.setButtonText("Restore…").setCta().onClick(() => { new RecoveryModal(this.app, this.owner).open(); }));
 
     new Setting(section)
-      .setName("Publish this vault")
-      .setDesc("Optional one-way first-device setup. Disable auto-sync first; Nyra creates the folder if needed and publishes only into an empty remote scope.")
-      .addButton((button) => button.setButtonText(this.busy.has("publish") ? "Publishing…" : "Upload to Nextcloud").setCta().setDisabled(busy || this.busy.has("publish") || this.owner.settings.connectionState !== "verified").onClick(() => {
-        void this.run("publish", async () => {
-          const report = await this.owner.publishVaultToNextcloud();
-          new Notice(`Vault published · ${plural(report.completed, "step")}.`);
-        }, "Publish blocked");
+      .setName("Upload everything to Nextcloud")
+      .setDesc("Emergency button for when Nextcloud lost files and this device still has them. Uploads every file this device has that Nextcloud lacks, and replaces a different Nextcloud copy unless that copy is clearly newer (Nextcloud keeps the old version). Nothing is deleted and nothing is downloaded.")
+      .addButton((button) => button.setButtonText(this.busy.has("publish") ? "Uploading…" : "Upload everything").setWarning().setDisabled(busy || this.busy.has("publish") || this.owner.settings.connectionState !== "verified").onClick(() => {
+        new ConfirmModal(this.app, "Upload everything from this device?", [
+          "Every file on this device that Nextcloud does not have will be uploaded.",
+          "If Nextcloud has a different copy that is not newer, this device's version replaces it; Nextcloud keeps the previous version.",
+          "Nothing is deleted on either side, and nothing is downloaded."
+        ], "Upload everything", (confirmed) => {
+          if (!confirmed) return;
+          void this.run("publish", async () => {
+            const report = await this.owner.publishVaultToNextcloud();
+            new Notice(describeEmergencyUpload(report), 30_000);
+          }, "Upload blocked");
+        }).open();
       }));
 
     new Setting(section)

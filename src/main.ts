@@ -24,6 +24,7 @@ import { DeletionLedger, type DeletedFileRecord } from "./recovery/deletion-ledg
 import { NextcloudTrash, type TrashedItem } from "./recovery/nextcloud-trash";
 import { NextcloudVersions, type FileVersion } from "./recovery/file-versions";
 import { HistoryService } from "./recovery/history-service";
+import { makeEmergencyPushPlan } from "./planner/emergency-push";
 import { RecoveryService, type RestorePreview, type RestoreSinceReport } from "./recovery/recovery-service";
 import { basicAuthorization } from "./security/base64";
 import { ServerHealthMonitor } from "./health/monitor";
@@ -79,6 +80,9 @@ import { setIncluded } from "./local/selection";
 /** Held bulk deletions release themselves after this wait if they only remove files from this device and stay at or below this share of tracked files. */
 const AUTO_APPROVE_DELETIONS_GRACE_MS = 10 * 60_000;
 const AUTO_APPROVE_DELETIONS_MAX_SHARE = 0.1;
+
+/** Files per committed round of the emergency upload. */
+const EMERGENCY_UPLOAD_BATCH = 40;
 
 const FAST_REMOTE_FENCE_MS = 5 * 60_000;
 
@@ -464,24 +468,88 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
   }
 
   /** Publish a local-first vault only when the selected remote scope is empty. */
-  async publishVaultToNextcloud(): Promise<ExecutionReport> {
+  /**
+   * Emergency upload: makes Nextcloud match this device. Every file this device has and Nextcloud lacks is
+   * uploaded; a different Nextcloud copy is replaced unless it is clearly newer (then the normal sync keeps
+   * both). Nothing is deleted on either side and nothing is downloaded. Work runs in small committed batches,
+   * so a failing file is reported without stopping the others.
+   */
+  async publishVaultToNextcloud(): Promise<EmergencyUploadReport> {
     return await this.runManualOperation(async () => {
       const settings = structuredClone(this.settings);
       const account = settings.account;
-      if (settings.connectionState !== "verified" || !account) throw new Error("Verify the Nextcloud connection before publishing.");
+      if (settings.connectionState !== "verified" || !account) throw new Error("Verify the Nextcloud connection before uploading.");
       const health = await this.checkServerHealth();
-      if (health.state !== "online") throw new Error(`Nextcloud is ${health.state}. Publishing is paused until the server is online.`);
+      if (health.state !== "online") throw new Error(`Nextcloud is ${health.state}. Uploading is paused until the server is online.`);
 
       const remote = await this.createRemoteMutator(settings);
       await remote.ensureDirectoryPath(account.webdavRootUrl, settings.remoteRootPath);
-      const localOutcome = await this.scanLocalVaultInternal("publish-preflight");
-      const remoteOutcome = await this.scanRemoteVaultInternal();
-      const plan = await this.buildSyncPlanInternal();
+      const localOutcome = await this.scanLocalVaultInternal("emergency-upload-local");
+      if (!localOutcome.scan.complete) throw new Error("The local file list is incomplete, so nothing was uploaded. Try again in a moment.");
       const localFiles = localOutcome.scan.kind === "full" ? localOutcome.scan.entries.length : 0;
-      const assessment = assessBootstrapPlan(plan, localFiles, remoteOutcome.scan.entries.length);
-      if (!assessment.canPublish) throw new Error(assessment.publishReason);
-      return await this.applyCurrentSyncPlanInternal(false, "bootstrap-push");
+      if (localFiles === 0) throw new Error("This device has no files to upload. Nothing was changed.");
+      const remoteOutcome = await this.scanRemoteVaultInternal();
+      if (remoteOutcome.scan.trust !== "authoritative") throw new Error("The Nextcloud file list is incomplete, so nothing was uploaded. Try again in a moment.");
+
+      // A device that remembers files as "deleted on Nextcloud" must not read an upload as a conflict.
+      await this.reseedLocalRecordsForPush();
+
+      const report: EmergencyUploadReport = { localFiles, uploaded: 0, replaced: 0, alreadyThere: 0, leftForSync: 0, failed: 0, failures: [], rounds: 0 };
+      const failedEntries = new Set<string>();
+      let singles = 0;
+      let stagnant = 0;
+      for (let round = 0; round < 500; round += 1) {
+        const plan = await this.buildSyncPlanInternal();
+        const state = this.durableState?.getState();
+        if (!state) throw new Error(this.stateInitializationError ?? "Execution state is unavailable.");
+        const { plan: pushPlan, stats } = await makeEmergencyPushPlan(plan, state, { limit: singles > 0 ? 1 : EMERGENCY_UPLOAD_BATCH, skip: failedEntries });
+        report.alreadyThere = stats.same;
+        report.leftForSync = stats.deferred;
+        if (pushPlan.items.length === 0) break;
+        report.rounds += 1;
+        try {
+          const result = await this.applyCurrentSyncPlanInternal(false, "emergency-push", pushPlan, false, false);
+          report.uploaded += result.results.filter((step) => step.status === "completed" && step.kind === "upload-create").length;
+          report.replaced += result.results.filter((step) => step.status === "completed" && step.kind === "upload-update").length;
+          stagnant = result.completed > 0 ? 0 : stagnant + 1;
+        } catch (error) {
+          if (pushPlan.items.length === 1) {
+            const only = pushPlan.items[0]!;
+            failedEntries.add(only.entryId);
+            report.failed += 1;
+            if (report.failures.length < 20) report.failures.push(`${only.displayPath}: ${errorMessage(error)}`);
+          } else {
+            // One bad file aborts its whole batch; retry the remaining work one file at a time.
+            singles = EMERGENCY_UPLOAD_BATCH;
+            this.logger.warn("emergency-upload.batch-failed", { error: errorMessage(error) });
+            continue;
+          }
+        }
+        if (singles > 0) singles -= 1;
+        if (stagnant >= 3) break;
+      }
+      try { await this.scanRemoteVaultInternal(); }
+      catch (error) { this.logger.warn("emergency-upload.final-rescan-failed", { error: errorMessage(error) }); }
+      this.autoSync?.noteLocalActivity();
+      this.logger.info("emergency-upload.finished", { ...report, failures: report.failures.length });
+      return report;
     });
+  }
+
+  /** Forgets stale histories of every file this device has, so an upload is planned from what exists now. */
+  private async reseedLocalRecordsForPush(): Promise<number> {
+    const store = this.durableState;
+    if (!store) return 0;
+    const stale = Object.values(store.getState().files).filter((record) => record.local !== null && (record.baseline !== null || record.status === "pending-delete"));
+    if (stale.length === 0) return 0;
+    await store.transact("emergency-upload-reseed", (tx, base) => {
+      for (const record of stale) {
+        tx.putFile({ entryId: record.entryId, path: record.local?.path ?? record.path, baseline: null, local: record.local, remote: record.remote, status: record.remote ? "both-dirty" : "local-dirty" });
+        for (const tombstone of Object.values(base.tombstones)) if (tombstone.entryId === record.entryId) tx.removeTombstone(tombstone.tombstoneId);
+      }
+    });
+    this.logger.warn("emergency-upload.reseeded", { records: stale.length });
+    return stale.length;
   }
 
   /** Download a remote-first vault only when this device's current sync scope is empty. */
@@ -897,7 +965,7 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
     }
   }
 
-  private async applyCurrentSyncPlanInternal(allowDestructive: boolean, mode: ExecutionMode = "bidirectional", planOverride?: SyncPlan, forceSafeMerge = false): Promise<ExecutionReport> {
+  private async applyCurrentSyncPlanInternal(allowDestructive: boolean, mode: ExecutionMode = "bidirectional", planOverride?: SyncPlan, forceSafeMerge = false, postScan = true): Promise<ExecutionReport> {
     if (this.executionActive) throw new Error("A transactional sync execution is already running.");
     if (!this.durableState || !this.localMutator || !this.planner) throw new Error(this.stateInitializationError ?? "Execution state is unavailable.");
     if (!this.localFactsComplete || !this.remoteFactsComplete) {
@@ -988,9 +1056,9 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
       }
       throw error;
     } finally {
-      try { await this.scanRemoteVaultInternal(); }
+      try { if (postScan) await this.scanRemoteVaultInternal(); }
       catch (error) { this.logger.warn("apply.post-remote-rescan-failed", { error: errorMessage(error) }); }
-      try { if (this.localInventory) {
+      try { if (postScan && this.localInventory) {
         const outcome = await this.localInventory.scanFull("post-execution");
         this.localFactsComplete = outcome.scan.complete;
         if (outcome.scan.complete) this.lastFullLocalScanAtMs = Date.now();
@@ -1552,6 +1620,17 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
     this.statusBarEl.textContent = status.text;
     this.statusBarEl.title = status.detail;
   }
+}
+
+export interface EmergencyUploadReport {
+  localFiles: number;
+  uploaded: number;
+  replaced: number;
+  alreadyThere: number;
+  leftForSync: number;
+  failed: number;
+  failures: string[];
+  rounds: number;
 }
 
 export type { SyncConflictReview } from "./plugin/conflict-copies";
