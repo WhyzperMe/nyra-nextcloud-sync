@@ -11,23 +11,25 @@ export interface SyncConflictReview {
   remote: { path: string; sha256: string | null; size: number; mtimeMs: number | null; fileId: string | null; etag: string | null } | null;
 }
 
+/** Splits a file name into stem and extension; `.excalidraw.md` stays together so the copy is still a drawing. */
+function splitName(name: string): { stem: string; extension: string } {
+  const drawing = /^(.+?)(.excalidraw.md)$/i.exec(name);
+  if (drawing) return { stem: drawing[1]!, extension: drawing[2]! };
+  const dot = name.lastIndexOf(".");
+  return { stem: dot > 0 ? name.slice(0, dot) : name, extension: dot > 0 ? name.slice(dot) : "" };
+}
+
 export function conflictCopyPath(sourcePath: string, side: "LOCAL" | "REMOTE", hash: string): string {
   const slash = sourcePath.lastIndexOf("/");
   const directory = slash < 0 ? "" : sourcePath.slice(0, slash + 1);
-  const name = sourcePath.slice(slash + 1);
-  const dot = name.lastIndexOf(".");
-  const stem = dot > 0 ? name.slice(0, dot) : name;
-  const extension = dot > 0 ? name.slice(dot) : "";
+  const { stem, extension } = splitName(sourcePath.slice(slash + 1));
   return canonicalVaultRelativePath(`${directory}${stem} (Nyra conflict ${side} ${hash.slice(0, 12)})${extension}`);
 }
 
 export function addConflictSuffix(path: string, suffix: number): string {
   const slash = path.lastIndexOf("/");
   const directory = slash < 0 ? "" : path.slice(0, slash + 1);
-  const name = path.slice(slash + 1);
-  const dot = name.lastIndexOf(".");
-  const stem = dot > 0 ? name.slice(0, dot) : name;
-  const extension = dot > 0 ? name.slice(dot) : "";
+  const { stem, extension } = splitName(path.slice(slash + 1));
   return `${directory}${stem} (${suffix})${extension}`;
 }
 

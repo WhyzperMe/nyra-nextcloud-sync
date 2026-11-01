@@ -1,5 +1,6 @@
 import type { Logger } from "../diagnostics/logger";
-import { mergeFileThreeWay } from "../merge/merge-dispatch";
+import { mergeFileThreeWay, mergeFileTwoWay } from "../merge/merge-dispatch";
+import { isExcalidrawPath } from "../merge/excalidraw-merge";
 import type { TextMergeBlockedReason, TextMergeLimits } from "../merge/types";
 import type { SyncPlan, SyncPlanItem, SyncPlanStep } from "../planner/types";
 import { appendWebdavPath } from "../remote/path";
@@ -332,16 +333,17 @@ export class TransactionalSyncExecutor {
     const baseline = record.baseline;
     const local = requireLocal(record);
     const remote = requireRemote(record);
-    if (!baseline) throw new AutomaticMergeBlockedError("overlapping-edits", "Automatic three-way merge requires a verified common ancestor.");
-    if (baseline.size > limits.maxInputBytes || local.size > limits.maxInputBytes || remote.size > limits.maxInputBytes) {
+    // Without a common ancestor only drawings can merge (their elements carry their own versions).
+    if (!baseline && !isExcalidrawPath(local.path)) throw new AutomaticMergeBlockedError("overlapping-edits", "Automatic three-way merge requires a verified common ancestor.");
+    if ((baseline?.size ?? 0) > limits.maxInputBytes || local.size > limits.maxInputBytes || remote.size > limits.maxInputBytes) {
       throw new AutomaticMergeBlockedError("input-too-large", `Automatic merge is limited to ${limits.maxInputBytes} bytes per version.`);
     }
 
     const [baseBytes, localVerified] = await Promise.all([
-      this.store.getBlob(baseline.blobHash),
+      baseline ? this.store.getBlob(baseline.blobHash) : Promise.resolve(null),
       this.local.readVerified(local.path, local.contentHash)
     ]);
-    if (baseBytes.byteLength !== baseline.size) throw new Error(`Baseline size mismatch for '${item.displayPath}'.`);
+    if (baseBytes && baseline && baseBytes.byteLength !== baseline.size) throw new Error(`Baseline size mismatch for '${item.displayPath}'.`);
 
     const stream = await this.remote.openDownload(this.remoteUrl(remote.path), remote.path, remote.fileId, remote.etag, this.transferProgress());
     void stream.completed.catch(() => undefined);
@@ -356,7 +358,9 @@ export class TransactionalSyncExecutor {
     // the merge is blocked: the conflict then offers an explicit choice instead of waiting for a re-verify.
     if (remote.contentHash === null) record.remote = { ...remote, contentHash: remoteCompleted.contentHash };
 
-    const merged = mergeFileThreeWay(local.path, baseBytes, localVerified.bytes, remoteBytes, limits);
+    const merged = baseBytes
+      ? mergeFileThreeWay(local.path, baseBytes, localVerified.bytes, remoteBytes, limits)
+      : mergeFileTwoWay(local.path, localVerified.bytes, remoteBytes, limits);
     if (merged.status === "blocked") throw new AutomaticMergeBlockedError(merged.reason, merged.message);
 
     // Re-fence local immediately before the first mutation. The remote upload is

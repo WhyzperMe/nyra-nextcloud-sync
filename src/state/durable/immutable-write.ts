@@ -2,6 +2,7 @@ import type { StateBackend } from "./backend";
 import { parentStatePath, stateBaseName } from "./backend";
 import { equalBytes, sha256Hex } from "./crypto";
 import { randomId } from "./ids";
+import { settles } from "../../platform/settle";
 
 /**
  * Writes a unique immutable file via same-directory staging and read-back.
@@ -90,23 +91,6 @@ export async function writeImmutableBinary(
     }
   } finally {
     await bestEffortRemove(backend, tempPath);
-  }
-}
-
-const SETTLE_DELAYS_MS = [25, 75, 200];
-
-/**
- * Mobile adapters can return a stale or short read immediately after a write. A check that fails is
- * repeated a few times with growing pauses before it is believed; a check that passes returns at once.
- */
-async function settles(check: () => Promise<boolean>): Promise<boolean> {
-  for (let attempt = 0; ; attempt += 1) {
-    let ok = false;
-    try { ok = await check(); } catch { ok = false; }
-    if (ok) return true;
-    const delay = SETTLE_DELAYS_MS[attempt];
-    if (delay === undefined) return false;
-    await new Promise<void>((resolve) => setTimeout(resolve, delay));
   }
 }
 

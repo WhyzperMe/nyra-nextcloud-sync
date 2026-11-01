@@ -291,3 +291,13 @@ describe("sync cycle", () => {
     expect(none.executed).toBe(false);
   });
 });
+
+describe("Drawings created independently on both sides", () => {
+  it("are planned as an element-wise merge instead of a conflict", async () => {
+    const store = await openStore();
+    await seed(store, [{ entryId: "file_DRAW", path: "Schule/Physik.excalidraw.md", baseline: null, local: local("Schule/Physik.excalidraw.md", HA, 5_000), remote: remote("Schule/Physik.excalidraw.md", HB, "9", 9_000), status: "both-dirty" }]);
+    const plan = await new SyncPlanner().build(store.getState());
+    expect(plan.items[0]).toMatchObject({ classification: "concurrent-create", disposition: "merge-candidate" });
+    expect(plan.items[0]?.steps.map((step) => step.kind)).toEqual(["merge-text", "establish-baseline"]);
+  });
+});

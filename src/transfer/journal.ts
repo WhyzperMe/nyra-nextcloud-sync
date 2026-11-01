@@ -1,4 +1,5 @@
 import type { DataAdapter, Vault } from "obsidian";
+import { sameJson, settles } from "../platform/settle";
 import type { Logger } from "../diagnostics/logger";
 import { canonicalStringify } from "../state/durable/canonical-json";
 import { sha256Hex } from "../state/durable/crypto";
@@ -163,13 +164,14 @@ export class TransferJournalStore {
     const temp = `${dir}/.${String(record.sequence).padStart(8, "0")}.${randomId("tmp")}.tmp`;
     try {
       await this.adapter.write(temp, data);
-      if ((await this.adapter.read(temp)) !== data) throw new Error("Transfer journal staging read-back failed.");
+      const readsBack = (target: string) => settles(async () => sameJson(await this.adapter.read(target), data), [50, 150, 400, 1000]);
+      if (!(await readsBack(temp))) throw new Error("Transfer journal staging read-back failed.");
       try {
         await this.adapter.rename(temp, path);
       } catch (error) {
-        if (!(await this.adapter.exists(path)) || (await this.adapter.read(path)) !== data) throw error;
+        if (!(await this.adapter.exists(path)) || !(await readsBack(path))) throw error;
       }
-      if ((await this.adapter.read(path)) !== data) throw new Error("Transfer journal committed read-back failed.");
+      if (!(await readsBack(path))) throw new Error("Transfer journal committed read-back failed.");
     } finally {
       if (await this.adapter.exists(temp)) await this.adapter.remove(temp);
     }

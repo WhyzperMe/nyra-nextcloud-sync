@@ -1111,6 +1111,11 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
         } catch { return null; }
       },
       remoteRoot: () => this.settings.remoteRootPath,
+      remotePaths: async (fresh) => {
+        if (fresh) await this.scanRemoteVaultInternal();
+        const tree = this.lastRemoteTree;
+        return tree ? new Set<string>([...tree.files, ...tree.folders]) : null;
+      },
       ensureRemoteFolders: async (folders) => {
         const settings = structuredClone(this.settings);
         const account = settings.account;

@@ -7,6 +7,7 @@ import { chunkBounds } from "../transfer/chunking";
 import { IncrementalSha256 } from "../transfer/incremental-sha256";
 import { isWithinLocalReadBudget } from "../local/read-budget";
 import { getPluginDeviceRuntimeRoot } from "../platform/device-scope";
+import { sameJson, settles } from "../platform/settle";
 
 interface ApplyManifestV1 {
   version: 1;
@@ -561,11 +562,17 @@ export class LocalTransactionalMutator {
   private async writeManifest(path: string, manifest: ApplyManifest): Promise<void> {
     const data = JSON.stringify(manifest);
     const temp = `${path}.${randomId("tmp")}.tmp`;
+    // Phone storage may hand back a stale, short or re-encoded read right after a write. The manifest is
+    // small JSON, so the read-back is retried and compared as a value, not only as exact text.
+    const readsBack = (target: string) => settles(async () => {
+      if (sameJson(await this.adapter.read(target), data)) return true;
+      return sameJson(new TextDecoder().decode(await this.adapter.readBinary(target)), data);
+    }, [50, 150, 400, 1000, 2000]);
     try {
       await this.adapter.write(temp, data);
-      if ((await this.adapter.read(temp)) !== data) throw new Error("Local apply manifest staging verification failed.");
+      if (!(await readsBack(temp))) throw new Error("Local apply manifest staging verification failed.");
       await this.adapter.rename(temp, path);
-      if ((await this.adapter.read(path)) !== data) throw new Error("Local apply manifest commit verification failed.");
+      if (!(await readsBack(path))) throw new Error("Local apply manifest commit verification failed.");
     } finally {
       if (await this.adapter.exists(temp)) await this.adapter.remove(temp);
     }

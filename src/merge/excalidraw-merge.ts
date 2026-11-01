@@ -60,6 +60,40 @@ export function mergeExcalidrawThreeWay(
   const remote = parseDrawing(remoteBytes, markdown, "Nextcloud version");
   if ("status" in remote) return remote;
 
+  return combineDrawings(markdown, base, local, remote, limits);
+}
+
+/**
+ * Merges two drawings that have no common ancestor (both devices created or recreated the same file).
+ * Every element either side has is kept; an element both have goes to the higher `version`. The inputs
+ * are put into a canonical order first, so every device produces the same bytes.
+ */
+export function mergeExcalidrawTwoWay(path: string, aBytes: ArrayBuffer, bBytes: ArrayBuffer, limits: TextMergeLimits): TextMergeResult {
+  if (Math.max(aBytes.byteLength, bBytes.byteLength) > limits.maxInputBytes) {
+    return blocked("input-too-large", `Automatic merge is limited to ${limits.maxInputBytes} bytes per version.`);
+  }
+  const markdown = !/.excalidraw$/i.test(path);
+  const [firstBytes, secondBytes] = compareBytes(aBytes, bBytes) >= 0 ? [aBytes, bBytes] : [bBytes, aBytes];
+  const first = parseDrawing(firstBytes, markdown, "first version");
+  if ("status" in first) return first;
+  const second = parseDrawing(secondBytes, markdown, "second version");
+  if ("status" in second) return second;
+  const empty: ParsedDrawing = {
+    head: "", tail: "", compressed: first.compressed, bom: first.bom, eol: first.eol, trailingNewline: first.trailingNewline,
+    scene: { elements: [], appState: {}, files: {} }
+  };
+  return combineDrawings(markdown, empty, first, second, limits);
+}
+
+function compareBytes(a: ArrayBuffer, b: ArrayBuffer): number {
+  const x = new Uint8Array(a);
+  const y = new Uint8Array(b);
+  const length = Math.min(x.length, y.length);
+  for (let index = 0; index < length; index += 1) if (x[index] !== y[index]) return x[index]! - y[index]!;
+  return x.length - y.length;
+}
+
+function combineDrawings(markdown: boolean, base: ParsedDrawing, local: ParsedDrawing, remote: ParsedDrawing, limits: TextMergeLimits): TextMergeResult {
   const merged = mergeScenes(base.scene, local.scene, remote.scene);
   const head = mergeSurrounding(base.head, local.head, remote.head, limits);
   const tail = mergeSurrounding(base.tail, local.tail, remote.tail, limits);

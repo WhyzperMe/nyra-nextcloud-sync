@@ -194,3 +194,39 @@ describe("large text merge", () => {
     expect(Date.now() - started).toBeLessThan(15_000);
   }, 60_000);
 });
+
+describe("Excalidraw merge without a common ancestor", async () => {
+  const { mergeExcalidrawTwoWay } = await import("../src/merge/excalidraw-merge");
+  const { mergeFileTwoWay } = await import("../src/merge/merge-dispatch");
+  const path = "Schule/Physik.excalidraw.md";
+
+  it("keeps every stroke of two independently created copies and lets the newer element version win", () => {
+    const restored = file(scene([el("a", "a0", { version: 3, x: 10 }), el("b", "a1")]));
+    const live = file(scene([el("a", "a0", { version: 5, x: 99 }), el("c", "a2")], { theme: "light", scrollX: 4 }));
+    const result = mergeExcalidrawTwoWay(path, restored, live, limits);
+    expect(result.status).toBe("merged");
+    if (result.status !== "merged") return;
+    const merged = readScene(result.bytes);
+    expect(merged.elements.map((item) => item.id)).toEqual(["a", "b", "c"]);
+    expect(merged.elements[0]).toMatchObject({ version: 5, x: 99 });
+  });
+
+  it("gives every device the same bytes no matter which copy it calls local", () => {
+    const one = file(scene([el("a", "a0", { version: 2, x: 1 }), el("l", "a1")], { theme: "dark" }), "---\nexcalidraw-plugin: parsed\n---\n## Text Elements\nfoo ^1\n%%\n## Drawing\n");
+    const two = file(scene([el("a", "a0", { version: 2, x: 2 }), el("r", "a2")], { theme: "light" }), "---\nexcalidraw-plugin: parsed\n---\n## Text Elements\nbar ^2\n%%\n## Drawing\n");
+    const forward = mergeExcalidrawTwoWay(path, one, two, limits);
+    const backward = mergeExcalidrawTwoWay(path, two, one, limits);
+    expect(forward.status).toBe("merged");
+    expect(backward.status).toBe("merged");
+    if (forward.status === "merged" && backward.status === "merged") expect(dec(forward.bytes)).toBe(dec(backward.bytes));
+  });
+
+  it("is idempotent for identical copies and refuses what is not a drawing", () => {
+    const same = file(scene([el("a", "a0")]));
+    const result = mergeExcalidrawTwoWay(path, same, same, limits);
+    expect(result.status).toBe("merged");
+    if (result.status === "merged") expect(readScene(result.bytes).elements.map((item) => item.id)).toEqual(["a"]);
+    expect(mergeFileTwoWay("Notes/A.md", enc("a"), enc("b"), limits).status).toBe("blocked");
+    expect(mergeExcalidrawTwoWay(path, enc("garbage"), same, limits).status).toBe("blocked");
+  });
+});

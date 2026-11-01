@@ -15,6 +15,12 @@ export interface RecoveryDeps {
   remoteRoot(): string;
   /** Creates these folders (relative to the synchronized root, parents first) on Nextcloud if they are missing. */
   ensureRemoteFolders?(folders: readonly string[]): Promise<void>;
+  /**
+   * Paths (relative to the synchronized root) that exist on Nextcloud right now, or null when unknown.
+   * Nextcloud answers a restore onto an occupied path by inventing a renamed copy, so occupied paths are
+   * left alone. `fresh` asks for a new scan instead of the last one.
+   */
+  remotePaths?(fresh: boolean): Promise<ReadonlySet<string> | null>;
   now?(): Date;
 }
 
@@ -68,9 +74,11 @@ export class RecoveryService {
   /** Counts what a restore since `since` would bring back, without changing anything. */
   async previewSince(since: Date): Promise<RestorePreview> {
     const trashItems = await this.trashSince(since);
+    const occupied = await this.deps.remotePaths?.(false) ?? null;
+    const restorable = trashItems.filter((item) => !occupied?.has(this.relativeToRoot(item.originalLocation)));
     const covered = coveredPaths(trashItems.map((item) => this.relativeToRoot(item.originalLocation)), trashItems);
     const localCopies = (await this.deps.ledger.recent()).filter((entry) => Date.parse(entry.deletedAt) >= since.getTime() && !isCovered(entry.path, covered)).length;
-    return { since: since.toISOString(), trashItems: trashItems.length, localCopies };
+    return { since: since.toISOString(), trashItems: restorable.length, localCopies };
   }
 
   /**
@@ -86,6 +94,9 @@ export class RecoveryService {
     const items = trash ? await this.trashSince(since) : [];
     const relatives = new Map(items.map((item) => [item, this.relativeToRoot(item.originalLocation)] as const));
     const covered = coveredPaths([...relatives.values()], items);
+    let occupied: ReadonlySet<string> | null = null;
+    try { occupied = items.length > 0 ? await this.deps.remotePaths?.(true) ?? null : null; }
+    catch (error) { note(`Could not check what already exists on Nextcloud: ${messageOf(error)}`); }
 
     if (trash && items.length > 0) {
       const folders = new Set<string>();
@@ -99,6 +110,8 @@ export class RecoveryService {
       catch (error) { note(`Could not prepare folders on Nextcloud: ${messageOf(error)}`); }
       const ordered = [...items].sort((a, b) => depthOf(relatives.get(a) ?? "") - depthOf(relatives.get(b) ?? "") || (a.isFolder === b.isFolder ? 0 : a.isFolder ? -1 : 1));
       for (const item of ordered) {
+        // Something already lives at this name: keep it. Restoring would only create a renamed duplicate.
+        if (occupied?.has(relatives.get(item) ?? "")) { report.trashPresent += 1; continue; }
         try {
           await trash.restore(item);
           report.trashRestored += 1;

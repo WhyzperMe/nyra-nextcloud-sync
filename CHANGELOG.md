@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.24.0
+
+**Restored and merged files keep their original names, and the phone no longer stops with "local apply manifest staging verification failed".**
+
+- **Where the odd names came from.** "… (Wiederhergestellt)" is not Nyra: when a file is restored from the Nextcloud trash onto a path that is already taken, Nextcloud itself invents a renamed copy. The restore now looks at what exists on Nextcloud first and leaves occupied names alone (they are counted as "already there"), so nothing is renamed. "… (Nyra conflict REMOTE …)" came from two different copies of the same drawing meeting after the restore.
+- **Drawings that exist twice are merged, not duplicated.** When both sides have their own version of a drawing and there is no common ancestor, Nyra now merges them element by element (every stroke from both is kept, the higher element version wins, every device produces the same file) instead of keeping one and saving the other as a conflict copy. Other file types still keep the newer version and preserve the other as a copy, because nothing may be lost.
+- **Conflict copies of drawings stay drawings.** The marker goes before the extension: `Name (Nyra conflict REMOTE abc).excalidraw.md`, not `Name.excalidraw (Nyra conflict …).md`.
+- **Phone: manifest verification.** The apply manifest, the transfer journal and the runtime scope binding were each checked by reading the file straight back and requiring the exact same text. Android can return a stale, empty or differently laid out read right after a write. The read-back is now retried for up to a few seconds, compared as a JSON value, and also tried through a binary read before anything is declared failed.
+- 8 new tests: stale and re-encoded reads on the manifest, occupied names during a restore, two-way drawing merge (union, newer element version wins, same bytes on every device), merge planning, conflict copy names.
+
 ## 0.23.0
 
 **Nothing is deleted on Nextcloud because a device looks empty, and one tap restores what was lost.**

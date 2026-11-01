@@ -1,4 +1,4 @@
-import { isExcalidrawPath, mergeExcalidrawThreeWay } from "./excalidraw-merge";
+import { isExcalidrawPath, mergeExcalidrawThreeWay, mergeExcalidrawTwoWay } from "./excalidraw-merge";
 import { mergeTextThreeWay } from "./text-merge";
 import type { TextMergeLimits, TextMergeResult } from "./types";
 
@@ -10,4 +10,12 @@ export function mergeFileThreeWay(path: string, base: ArrayBuffer, local: ArrayB
   return isExcalidrawPath(path)
     ? mergeExcalidrawThreeWay(path, base, local, remote, limits)
     : mergeTextThreeWay(base, local, remote, limits);
+}
+
+/** Merge without a common ancestor; only drawings support it (their elements carry their own versions). */
+export function mergeFileTwoWay(path: string, local: ArrayBuffer, remote: ArrayBuffer, limits: TextMergeLimits): TextMergeResult {
+  if (!isExcalidrawPath(path)) {
+    return { status: "blocked", reason: "overlapping-edits", message: "Without a common ancestor only drawings can be merged automatically." };
+  }
+  return mergeExcalidrawTwoWay(path, local, remote, limits);
 }

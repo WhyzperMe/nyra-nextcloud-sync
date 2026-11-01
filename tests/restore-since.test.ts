@@ -11,7 +11,7 @@ function item(original: string, hours: number, isFolder = false): TrashedItem {
   return { trashName: `${original.split("/").pop()}.d${hours}`, originalLocation: original, isFolder, size: isFolder ? null : 5, deletedAt: ago(hours) };
 }
 
-function setup(trashItems: TrashedItem[], ledger: DeletedFileRecord[], options: { existing?: string[]; failing?: Set<string>; noTrash?: boolean } = {}) {
+function setup(trashItems: TrashedItem[], ledger: DeletedFileRecord[], options: { existing?: string[]; failing?: Set<string>; noTrash?: boolean; occupied?: string[] } = {}) {
   const restored: string[] = [];
   const created: string[] = [];
   const folders: string[][] = [];
@@ -34,6 +34,7 @@ function setup(trashItems: TrashedItem[], ledger: DeletedFileRecord[], options: 
     trash: () => (options.noTrash ? null : trash),
     remoteRoot: () => "Obsidian/Nyra",
     async ensureRemoteFolders(list) { folders.push([...list]); },
+    async remotePaths() { return options.occupied ? new Set(options.occupied) : null; },
     now: () => new Date(NOW)
   };
   return { service: new RecoveryService(deps), restored, created, folders, forgotten };
@@ -50,6 +51,16 @@ describe("Restore everything deleted since a time", () => {
     expect(restored).toEqual(["Obsidian/Nyra/Schule", "Obsidian/Nyra/Schule/Mathe/Aufgabe.md"]);
     expect(folders).toEqual([["Schule", "Schule/Mathe"]]);
     expect(report).toMatchObject({ trashRestored: 2, trashFailed: 0, localRestored: 0 });
+  });
+
+  it("leaves occupied names alone so Nextcloud never invents a renamed duplicate", async () => {
+    const { service, restored } = setup([item("Obsidian/Nyra/DiePhysiker.excalidraw.md", 1), item("Obsidian/Nyra/Neu.md", 1)], [],
+      { occupied: ["DiePhysiker.excalidraw.md"] });
+    const since = new Date(NOW - 3_600_000 * 5);
+    expect(await service.previewSince(since)).toMatchObject({ trashItems: 1 });
+    const report = await service.restoreSince(since);
+    expect(restored).toEqual(["Obsidian/Nyra/Neu.md"]);
+    expect(report).toMatchObject({ trashRestored: 1, trashPresent: 1 });
   });
 
   it("counts items that already exist, keeps going after a failure and reports it", async () => {

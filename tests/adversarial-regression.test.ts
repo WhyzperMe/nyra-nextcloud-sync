@@ -319,6 +319,33 @@ describe("Adversarial local ambiguous completion", () => {
     expect(await adapter.exists(manifestPath)).toBe(true);
   });
 
+  it("writes its apply manifest even when the phone returns stale or re-encoded text right after the write", async () => {
+    class StaleTextAdapter extends MemoryVaultAdapter {
+      staleReads = 0;
+      override async read(path: string): Promise<string> {
+        const text = await super.read(path);
+        if (path.endsWith(".tmp") && this.staleReads < 3) { this.staleReads += 1; return ""; }
+        // Same JSON value, different layout: a storage layer that pretty-prints on the way back.
+        return path.endsWith(".json") ? JSON.stringify(JSON.parse(text), null, 1) : text;
+      }
+      override async readBinary(path: string): Promise<ArrayBuffer> {
+        if (path.endsWith(".tmp") && this.staleReads < 3) { this.staleReads += 1; return new ArrayBuffer(0); }
+        return await super.readBinary(path);
+      }
+    }
+    const adapter = new StaleTextAdapter();
+    const content = new TextEncoder().encode("hello").buffer;
+    await adapter.writeBinary("From.md", content);
+    const hash = await sha256Hex(content);
+    const mutator = new LocalTransactionalMutator(makeMemoryVault(adapter), "nyra-nextcloud-sync", logger, DEVICE_SCOPE);
+    await mutator.initializeAndRecover();
+    const moved = await mutator.moveAtomic("From.md", "Folder/To.md", hash);
+    expect(moved.path).toBe("Folder/To.md");
+    expect(adapter.staleReads).toBe(3);
+    expect(await adapter.exists("From.md")).toBe(false);
+    expect(await adapter.exists("Folder/To.md")).toBe(true);
+  }, 20_000);
+
   it("prepares exact-size upload chunks without writing to storage, even when the adapter reads short after writes", async () => {
     class ShortReadAdapter extends MemoryVaultAdapter {
       override async readBinary(path: string): Promise<ArrayBuffer> {

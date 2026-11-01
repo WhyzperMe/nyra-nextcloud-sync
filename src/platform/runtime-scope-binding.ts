@@ -1,4 +1,5 @@
 import type { DataAdapter } from "obsidian";
+import { sameJson, settles } from "./settle";
 import { sha256Hex } from "../state/durable/crypto";
 import { getPluginDeviceRuntimeRoot } from "./device-scope";
 
@@ -78,9 +79,10 @@ async function writeBinding(adapter: DataAdapter, path: string, identityHash: st
   } else {
     await adapter.write(temp, content);
   }
-  if ((await adapter.read(temp)) !== content) throw new Error("Nyra runtime scope binding failed staging verification.");
+  const readsBack = (target: string) => settles(async () => sameJson(await adapter.read(target), content), [50, 150, 400, 1000]);
+  if (!(await readsBack(temp))) throw new Error("Nyra runtime scope binding failed staging verification.");
   await adapter.rename(temp, path);
-  if ((await adapter.read(path)) !== content) throw new Error("Nyra runtime scope binding failed commit verification.");
+  if (!(await readsBack(path))) throw new Error("Nyra runtime scope binding failed commit verification.");
 }
 
 async function mkdirp(adapter: DataAdapter, path: string): Promise<void> {

@@ -219,6 +219,16 @@ function classifyWithoutBaseline(record: FileReplicaRecord, displayPath: string)
         step("establish-baseline", local.path, null, false, false, "Adopt the identical verified content as the first common ancestor.")
       ], facts);
     }
+    if (isDrawing(local.path)) {
+      // Drawings carry per-element versions, so two independent copies can be merged without an ancestor.
+      return item(record, displayPath, "concurrent-create", "merge-candidate", [
+        "Both sides independently created different versions of this drawing.",
+        "Nyra merges them element by element (the higher element version wins), so no extra conflict copy is needed."
+      ], [
+        step("merge-text", remote.path, local.path, false, true, "Merge both drawings element by element and verify the result on both replicas."),
+        step("establish-baseline", local.path, null, false, false, "Adopt the merged drawing as the first common ancestor.")
+      ], facts);
+    }
     if (isTextMergeCandidate(local.path, remote.path)) {
       return item(record, displayPath, "concurrent-create", "blocked", [
         "Both sides independently created different text at the same path, but no verified common ancestor exists.",
@@ -275,6 +285,9 @@ function step(kind: SyncPlanStep["kind"], sourcePath: string | null, targetPath:
 }
 function manualStep(path: string, description: string): SyncPlanStep {
   return step("manual-resolution", path, null, false, false, description);
+}
+function isDrawing(path: string): boolean {
+  return /.excalidraw(.md)?$/i.test(path);
 }
 function isTextMergeCandidate(...paths: string[]): boolean {
   // Automatic merge is deliberately limited to note/plain-text formats and Excalidraw drawings (which have
