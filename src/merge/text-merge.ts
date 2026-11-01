@@ -66,8 +66,9 @@ export function mergeTextThreeWay(
   const chosenEol = chooseThreeWayMetadata(base.value.lineEnding, local.value.lineEnding, remote.value.lineEnding);
   if (chosenEol === null) return blocked("metadata-conflict", "Both sides changed the line-ending style differently.");
 
-  const localCells = base.value.lines.length * local.value.lines.length;
-  const remoteCells = base.value.lines.length * remote.value.lines.length;
+  // Only the region between the common head and tail of two versions needs the exact diff.
+  const localCells = trimmedCells(base.value.lines, local.value.lines);
+  const remoteCells = trimmedCells(base.value.lines, remote.value.lines);
   if (!Number.isSafeInteger(localCells) || !Number.isSafeInteger(remoteCells) || localCells > limits.maxDiffCells || remoteCells > limits.maxDiffCells) {
     return blocked("diff-too-complex", `Automatic merge diff budget exceeded (${limits.maxDiffCells} cells per side).`);
   }
@@ -162,8 +163,28 @@ function chooseThreeWayMetadata<T>(base: T, local: T, remote: T): T | null {
   return null;
 }
 
+/** Lines both versions share at the start and at the end; they cannot be part of any change. */
+function commonEnds(base: readonly string[], variant: readonly string[]): { prefix: number; suffix: number } {
+  const limit = Math.min(base.length, variant.length);
+  let prefix = 0;
+  while (prefix < limit && base[prefix] === variant[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < limit - prefix && base[base.length - 1 - suffix] === variant[variant.length - 1 - suffix]) suffix += 1;
+  return { prefix, suffix };
+}
+
+function trimmedCells(base: readonly string[], variant: readonly string[]): number {
+  const { prefix, suffix } = commonEnds(base, variant);
+  return (base.length - prefix - suffix) * (variant.length - prefix - suffix);
+}
+
 function changesFromBase(base: readonly string[], variant: readonly string[]): ChangeHunk[] {
-  const pairs = hirschbergPairs(base, variant, 0, base.length, 0, variant.length);
+  const { prefix, suffix } = commonEnds(base, variant);
+  const middle = hirschbergPairs(base, variant, prefix, base.length - suffix, prefix, variant.length - suffix);
+  const pairs: LcsPair[] = [];
+  for (let index = 0; index < prefix; index += 1) pairs.push({ a: index, b: index });
+  for (const pair of middle) pairs.push(pair);
+  for (let index = 0; index < suffix; index += 1) pairs.push({ a: base.length - suffix + index, b: variant.length - suffix + index });
   const hunks: ChangeHunk[] = [];
   let previousA = -1;
   let previousB = -1;

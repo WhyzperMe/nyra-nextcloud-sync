@@ -482,7 +482,7 @@ async function testConflictFreeThreeWayMerge(): Promise<void> {
   if (conflict.status === "blocked") assert(conflict.reason === "overlapping-edits", "Overlap was blocked for the wrong reason.");
 
   const fresh = normalizeSettings(null);
-  assert(fresh.autoMergeText === true && fresh.autoMergeMaxMiB === 2, "Fresh installs must enable bounded safe text merge defaults.");
+  assert(fresh.autoMergeText === true && fresh.autoMergeMaxMiB === 16, "Fresh installs must enable bounded safe text merge defaults.");
   const upgraded = normalizeSettings({ schemaVersion: 6, remoteRootPath: "Obsidian", connectionState: "disconnected" });
   assert(upgraded.autoMergeText === true, "Legacy installs without an explicit merge opt-out must enable bounded safe merge.");
   const optedOut = normalizeSettings({ schemaVersion: 8, autonomyDefaultsVersion: 1, remoteRootPath: "Obsidian", connectionState: "disconnected", autoMergeText: false });

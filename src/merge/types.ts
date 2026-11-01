@@ -26,7 +26,8 @@ export type TextMergeBlockedReason =
   | "binary-content"
   | "mixed-line-endings"
   | "metadata-conflict"
-  | "overlapping-edits";
+  | "overlapping-edits"
+  | "excalidraw-unparseable";
 
 export interface TextMergeSuccess {
   status: "merged";

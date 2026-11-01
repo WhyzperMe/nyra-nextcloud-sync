@@ -1,5 +1,5 @@
 import type { Logger } from "../diagnostics/logger";
-import { mergeTextThreeWay } from "../merge/text-merge";
+import { mergeFileThreeWay } from "../merge/merge-dispatch";
 import type { TextMergeBlockedReason, TextMergeLimits } from "../merge/types";
 import type { SyncPlan, SyncPlanItem, SyncPlanStep } from "../planner/types";
 import { appendWebdavPath } from "../remote/path";
@@ -356,7 +356,7 @@ export class TransactionalSyncExecutor {
     // the merge is blocked: the conflict then offers an explicit choice instead of waiting for a re-verify.
     if (remote.contentHash === null) record.remote = { ...remote, contentHash: remoteCompleted.contentHash };
 
-    const merged = mergeTextThreeWay(baseBytes, localVerified.bytes, remoteBytes, limits);
+    const merged = mergeFileThreeWay(local.path, baseBytes, localVerified.bytes, remoteBytes, limits);
     if (merged.status === "blocked") throw new AutomaticMergeBlockedError(merged.reason, merged.message);
 
     // Re-fence local immediately before the first mutation. The remote upload is
@@ -508,7 +508,7 @@ function summarize(
     results
   };
 }
-const DEFAULT_MERGE_LIMITS: TextMergeLimits = { maxInputBytes: 2 * 1024 * 1024, maxLines: 12_000, maxDiffCells: 8_000_000 };
+const DEFAULT_MERGE_LIMITS: TextMergeLimits = { maxInputBytes: 16 * 1024 * 1024, maxLines: 250_000, maxDiffCells: 64_000_000 };
 
 class AutomaticMergeBlockedError extends Error {
   constructor(readonly reason: TextMergeBlockedReason, message: string) {

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.20.0
+
+**Huge notes and drawings merge instead of stopping at "Automatic merge is limited to 2097152 bytes per version".**
+
+- **Excalidraw drawings are merged semantically.** A `.excalidraw.md` file stores the scene as one compressed block, which cannot be merged line by line (and a line merge of two compressed streams could corrupt the drawing). Nyra now decompresses the scene, merges it element by element exactly like Excalidraw reconciles collaborators (an element only one side changed keeps that change; an element both changed goes to the higher `version`, then the lower `versionNonce`; additions from both devices are kept; a change beats a deletion; the result is ordered by Excalidraw's fractional index; app state and embedded files are merged per key), and writes it back in the plugin's own format. The codec is bit-compatible with the library Excalidraw uses (verified on a real 2.5 MB drawing, identical after a round trip) and the merge is deterministic, so every device produces the same file. A 2.5 MB drawing with 7,500 strokes merges in a few seconds on a desktop. If a drawing cannot be parsed, Nyra now asks for review instead of attempting a text merge.
+- **Plain-text merge scales to very large notes.** The common start and end of two versions are skipped before the exact diff, so edits in different places of a 200,000-line note merge in well under a second instead of exceeding the diff budget. Budgets: 16 MiB per version (was 2 MiB; the old default is upgraded automatically, up to 128 MiB can be set in `data.json`), 250,000 lines (was 12,000), 64 million diff cells (was 8 million).
+- 15 new tests: codec compatibility and round trips, all merge rules (including identical results on both devices), a drawing above the old limit, unparseable files, merging the text around the drawing, and a 200,000-line note.
+
 ## 0.19.0
 
 **Conflicts resolve themselves.** New setting **Resolve conflicts automatically** (Sync → on by default). Nothing is ever discarded: whatever does not stay at the path is first saved next to it.

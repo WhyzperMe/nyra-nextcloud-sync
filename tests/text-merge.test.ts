@@ -118,7 +118,9 @@ describe("Bounded three-way text merge regression", () => {
   });
 
   it("fails closed when configured complexity budgets are exceeded", () => {
-    expect(mergeTextThreeWay(b("A\nB\n"), b("A\nB\n"), b("A\nB\n"), { ...limits, maxDiffCells: 1 }).status).toBe("blocked");
+    expect(mergeTextThreeWay(b("A\nB\nC\n"), b("X\nY\nZ\n"), b("A\nB\nC\n"), { ...limits, maxDiffCells: 1 }).status).toBe("blocked");
+    // Identical versions have nothing to diff, so they never exceed the budget.
+    expect(mergeTextThreeWay(b("A\nB\n"), b("A\nB\n"), b("A\nB\n"), { ...limits, maxDiffCells: 1 }).status).toBe("merged");
     expect(mergeTextThreeWay(b("012345"), b("012345"), b("012345"), { ...limits, maxInputBytes: 2 }).status).toBe("blocked");
     expect(mergeTextThreeWay(b("A\nB\nC\n"), b("A\nB\nC\n"), b("A\nB\nC\n"), { ...limits, maxLines: 2 }).status).toBe("blocked");
   });

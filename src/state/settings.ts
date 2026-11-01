@@ -92,7 +92,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   fastRemoteCheck: true,
   autoMergeText: true,
   autoResolveConflicts: true,
-  autoMergeMaxMiB: 2,
+  autoMergeMaxMiB: 16,
   serverHealthCheckSeconds: 60,
   connectionState: "disconnected",
   account: null,
@@ -146,7 +146,8 @@ export function normalizeSettings(raw: unknown): PluginSettings {
     // boolean remains authoritative, including an explicit legacy opt-out.
     autoMergeText: upgrade || typeof raw.autoMergeText !== "boolean" ? inferLegacyAutoMergeDefault() : raw.autoMergeText,
     autoResolveConflicts: typeof raw.autoResolveConflicts === "boolean" ? raw.autoResolveConflicts : DEFAULT_SETTINGS.autoResolveConflicts,
-    autoMergeMaxMiB: safeInteger(raw.autoMergeMaxMiB, 1, 4, DEFAULT_SETTINGS.autoMergeMaxMiB),
+    // 2 was the old default (and the old ceiling was 4); large drawings need more room, so it now defaults to 16.
+    autoMergeMaxMiB: raw.autoMergeMaxMiB === 2 ? DEFAULT_SETTINGS.autoMergeMaxMiB : safeInteger(raw.autoMergeMaxMiB, 1, 128, DEFAULT_SETTINGS.autoMergeMaxMiB),
     serverHealthCheckSeconds: safeInteger(raw.serverHealthCheckSeconds, 30, 900, DEFAULT_SETTINGS.serverHealthCheckSeconds),
     connectionState: validConnectionState(raw.connectionState) ? raw.connectionState : DEFAULT_SETTINGS.connectionState,
     account: isVerifiedAccount(raw.account) ? raw.account : null,
@@ -169,8 +170,8 @@ export function transferTuningFromSettings(settings: PluginSettings): TransferTu
 export function mergeLimitsFromSettings(settings: PluginSettings): TextMergeLimits {
   return {
     maxInputBytes: settings.autoMergeMaxMiB * MIB,
-    maxLines: 12_000,
-    maxDiffCells: 8_000_000
+    maxLines: 250_000,
+    maxDiffCells: 64_000_000
   };
 }
 

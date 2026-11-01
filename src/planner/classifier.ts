@@ -277,10 +277,10 @@ function manualStep(path: string, description: string): SyncPlanStep {
   return step("manual-resolution", path, null, false, false, description);
 }
 function isTextMergeCandidate(...paths: string[]): boolean {
-  // Automatic merge is deliberately limited to automatic merge to note/plain-text formats.
-  // Structured JSON/YAML/Canvas and code can be syntactically invalid even when
-  // textual edit regions do not overlap, so they remain explicit review items.
-  const allowed = new Set(["md", "markdown", "txt"]);
+  // Automatic merge is deliberately limited to note/plain-text formats and Excalidraw drawings (which have
+  // their own semantic merge). Other structured JSON/YAML/Canvas and code can be syntactically invalid even
+  // when textual edit regions do not overlap, so they remain explicit review items.
+  const allowed = new Set(["md", "markdown", "txt", "excalidraw"]);
   return paths.every((path) => {
     const name = path.toLowerCase();
     const dot = name.lastIndexOf(".");

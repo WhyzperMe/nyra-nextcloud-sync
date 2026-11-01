@@ -129,7 +129,10 @@ describe("Merge and autosync setting migration", () => {
   it("enables bounded safe merge on a fresh install", () => {
     const settings = normalizeSettings(null);
     expect(settings.autoMergeText).toBe(true);
-    expect(settings.autoMergeMaxMiB).toBe(2);
+    expect(settings.autoMergeMaxMiB).toBe(16);
+    // The old default (2 MiB) moves to the new one; an explicit larger budget is kept.
+    expect(normalizeSettings({ schemaVersion: 8, autonomyDefaultsVersion: 1, autoMergeMaxMiB: 2 }).autoMergeMaxMiB).toBe(16);
+    expect(normalizeSettings({ schemaVersion: 8, autonomyDefaultsVersion: 1, autoMergeMaxMiB: 32 }).autoMergeMaxMiB).toBe(32);
   });
 
   it("enables bounded automatic safe merge when upgrading legacy settings without an explicit choice", () => {
