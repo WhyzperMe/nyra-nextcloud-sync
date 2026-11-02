@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.27.0
+
+- Hardened parallel transfers, deletions and recovery after a live audit.
+- Better automatic conflict resolution: word-level merge of edits to one long line, both insertions at the same spot kept in a device-independent order, an empty file never replaces content, implausible future modification times are not trusted.
+- Audit documents and live test tooling added.
+
 ## 0.26.0
 
 **Phone: "local apply manifest staging verification failed" no longer ends a sync.**
