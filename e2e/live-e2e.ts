@@ -116,6 +116,13 @@ async function main(): Promise<void> {
     if (created.status !== 201) throw new Error(`Could not create remote test root (${created.status}).`);
 
     await step("start desktop and mobile devices", async () => { await A.start(); await B.start(); });
+    const parallelWorkers = Number.parseInt(process.env.NYRA_E2E_TRANSFER_CONCURRENCY ?? "", 10);
+    if (Number.isInteger(parallelWorkers) && parallelWorkers > 1) {
+      // Opt-in: run the whole suite with parallel file transfers enabled on both devices.
+      await configure(A, (settings) => { settings.transferConcurrency = parallelWorkers; settings.transferMemoryMiB = 64; });
+      await configure(B, (settings) => { settings.transferConcurrency = parallelWorkers; settings.transferMemoryMiB = 64; });
+      console.log(`(parallel transfers: ${parallelWorkers} workers on both devices)`);
+    }
 
     const big = randomBytes(300 * 1024);
     const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), randomBytes(2048)]);
@@ -372,7 +379,8 @@ async function main(): Promise<void> {
       await until("conflict base on server", async () => (await remoteText("Conflict.md")) !== null, 90_000);
       await B.runSyncNow();
       await until("ipad has base", () => B.exists("Conflict.md"), 60_000);
-      await configure(B, (settings) => { settings.syncPaused = true; });
+      // Automatic resolution is on by default and would settle this at once; this scenario is about the manual review.
+      await configure(B, (settings) => { settings.syncPaused = true; settings.autoResolveConflicts = false; });
       await A.write("Conflict.md", "line one\nEDITED BY DESKTOP\nline three\n");
       await until("desktop edit on server", async () => (await remoteText("Conflict.md"))?.includes("DESKTOP") === true, 90_000);
       await B.write("Conflict.md", "line one\nEDITED BY IPAD\nline three\n");
@@ -388,7 +396,7 @@ async function main(): Promise<void> {
       const texts = names.map((name: string) => B.read(name).toString());
       if (!texts.some((text: string) => text.includes("IPAD")) || !texts.some((text: string) => text.includes("DESKTOP"))) throw new Error(`A conflicting version was lost: ${names.join(", ")}`);
       await B.plugin.resolveConflict(review.entryId, "keep-remote");
-      await configure(B, (settings) => { settings.syncPaused = false; });
+      await configure(B, (settings) => { settings.syncPaused = false; settings.autoResolveConflicts = true; });
       if (B.read("Conflict.md").toString() !== "line one\nEDITED BY DESKTOP\nline three\n") throw new Error("Keep-remote did not apply the desktop version.");
       if (![...B.walk("").files].some((name: string) => name.startsWith("Conflict (Nyra conflict LOCAL") && B.read(name).toString().includes("IPAD"))) throw new Error("The displaced iPad version was not preserved.");
       for (const name of B.walk("").files.filter((candidate: string) => candidate.startsWith("Conflict (Nyra conflict"))) await B.removeRecursive(name);
@@ -396,6 +404,31 @@ async function main(): Promise<void> {
       await until("conflict files removed everywhere", async () => { const t = await remoteTree(); return ![...t.files.keys()].some((p) => p.startsWith("Conflict")); }, 120_000, 2000);
       await B.runSyncNow();
       await until("ipad lost the resolved conflict note", () => !B.exists("Conflict.md"), 60_000);
+    });
+
+    await step("overlapping edits are settled automatically without losing either version", async () => {
+      await A.write("AutoConflict.md", "alpha\nshared line\nomega\n");
+      await until("auto conflict base on server", async () => (await remoteText("AutoConflict.md")) !== null, 90_000);
+      await B.runSyncNow();
+      await until("ipad has auto conflict base", () => B.exists("AutoConflict.md"), 60_000);
+      await configure(B, (settings) => { settings.syncPaused = true; });
+      await A.write("AutoConflict.md", "alpha\nAUTO DESKTOP\nomega\n");
+      await until("desktop auto edit on server", async () => (await remoteText("AutoConflict.md"))?.includes("AUTO DESKTOP") === true, 90_000);
+      await B.write("AutoConflict.md", "alpha\nAUTO IPAD\nomega\n");
+      await configure(B, (settings) => { settings.syncPaused = false; });
+      const bothSurvive = () => {
+        const texts = B.walk("").files.filter((name: string) => name.startsWith("AutoConflict")).map((name: string) => B.read(name).toString());
+        return texts.some((text: string) => text.includes("AUTO IPAD")) && texts.some((text: string) => text.includes("AUTO DESKTOP"));
+      };
+      await until("both versions survive and no review is left", async () => {
+        await B.runSyncNow();
+        return bothSurvive() && !B.plugin.syncConflictReviews().some((entry: { path: string }) => entry.path === "AutoConflict.md");
+      }, 120_000, 2000);
+      for (const name of B.walk("").files.filter((candidate: string) => candidate.startsWith("AutoConflict"))) await B.removeRecursive(name);
+      await A.removeRecursive("AutoConflict.md");
+      await until("auto conflict files removed everywhere", async () => { const t = await remoteTree(); return ![...t.files.keys()].some((p) => p.startsWith("AutoConflict")); }, 120_000, 2000);
+      await B.runSyncNow();
+      await until("ipad lost the auto conflict note", () => !B.walk("").files.some((name: string) => name.startsWith("AutoConflict")), 60_000);
     });
 
     const oversize = randomBytes(34 * 1024 * 1024); // above the iPad's 32 MiB whole-file limit

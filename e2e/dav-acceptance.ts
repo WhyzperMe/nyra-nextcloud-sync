@@ -64,6 +64,7 @@ async function main(): Promise<void> {
     const updatedBytes = new TextEncoder().encode("acceptance updated bytes\n");
     const updateReply = await request(unicodeUrl, "PUT", { "If-Match": initial.etag }, updatedBytes);
     requireStatus(updateReply, [200, 201, 204], "If-Match update failed");
+    checks.push(await waitForEtagAdvance(unicodeUrl, initial.etag, stat, "first update"));
     const staleBytes = new TextEncoder().encode("stale write");
     const staleReply = await request(unicodeUrl, "PUT", { "If-Match": initial.etag }, staleBytes);
     if (staleReply.status !== 412) {
@@ -104,6 +105,8 @@ async function main(): Promise<void> {
     const deviceB = await stat(peerUrl);
     const deviceAEdit = new TextEncoder().encode("A edit\nleft\nright\n");
     requireStatus(await request(peerUrl, "PUT", { "If-Match": deviceA.etag }, deviceAEdit), [200, 201, 204], "device A update failed");
+    // Production waits for the advanced tag as well; report how long this server needs.
+    checks.push(await waitForEtagAdvance(peerUrl, deviceA.etag, stat, "device A update"));
     requireStatus(await request(peerUrl, "PUT", { "If-Match": deviceB.etag }, new TextEncoder().encode("base\nleft\nB edit\n")), [412], "stale device B update was not blocked");
     const afterA = await stat(peerUrl);
     const mergedBytes = new TextEncoder().encode("A edit\nleft\nB edit\n");
@@ -353,3 +356,17 @@ void main().catch((error: unknown) => {
   if (acceptanceUploadSession) console.error("A unique upload test session may need removal; its path is intentionally omitted.");
   process.exitCode = 1;
 });
+
+/**
+ * Some storage backends advance an ETag lazily after a write, so a stale `If-Match` write that races inside that
+ * window is still accepted. This waits for the new tag (as the production probe does) and returns a check line that
+ * states the observed lag, so the limitation is visible instead of hidden.
+ */
+async function waitForEtagAdvance(url: string, previous: string | null, stat: (url: string) => Promise<{ etag: string | null }>, label: string): Promise<string> {
+  const started = Date.now();
+  let current = await stat(url);
+  while (current.etag === previous && Date.now() - started < 5000) { await new Promise((resolve) => setTimeout(resolve, 100)); current = await stat(url); }
+  if (current.etag === previous) throw new Error(`The ETag did not advance within 5 s after the ${label}.`);
+  const lag = Date.now() - started;
+  return lag > 250 ? `ETag advanced ${lag} ms after the ${label} (WARNING: writes racing inside this window cannot be fenced)` : `ETag advanced promptly after the ${label}`;
+}

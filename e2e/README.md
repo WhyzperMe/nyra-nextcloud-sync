@@ -16,7 +16,13 @@ export NYRA_E2E_PARENT=Obsidian        # existing remote folder that may be writ
 npm run e2e:live
 ```
 
-Set `NYRA_E2E_RAW_LOG=1` to print unredacted warnings and errors (the production logger redacts them).
+Set `NYRA_E2E_RAW_LOG=1` to print unredacted warnings and errors (the production logger redacts them). Set `NYRA_E2E_TRANSFER_CONCURRENCY=4` to run the whole suite with parallel file transfers on both devices.
+
+Under WSL with a Windows `npm`, environment variables only reach the test process if they are listed in `WSLENV` (for example `export WSLENV="$WSLENV:NYRA_E2E_SERVER:NYRA_E2E_USER:NYRA_E2E_APP_PASSWORD:NYRA_E2E_PARENT"`).
+
+## `npm run bench:live`
+
+Compares 1, 2, 4 and 8 parallel transfers (`NYRA_BENCH_WORKERS`, `NYRA_BENCH_FILES`) for uploading from one device and downloading to another, using the same `NYRA_E2E_*` variables. Each setting uses a fresh uniquely named remote folder that is deleted afterwards, and all content is verified by SHA-256.
 
 ## `npm run acceptance:live`
 
