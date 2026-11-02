@@ -30,10 +30,18 @@ interface LcsPair {
 /**
  * Strict, bounded, conflict-free three-way text merge.
  *
- * The engine deliberately does less than Git's interactive merge machinery:
- * it only returns bytes when BASE→LOCAL and BASE→REMOTE edits provably commute.
- * It never emits conflict markers and never guesses an ordering for two edits at
- * the same logical location. Unsupported/ambiguous cases are returned as blocked.
+ * It never emits conflict markers and returns bytes only when both sides' edits can be combined
+ * without discarding anything and without a guess that depends on which device runs the merge:
+ *
+ *  - edits to different lines combine (line level);
+ *  - edits that overlap a line are re-tried on words, but only if at least one unchanged word
+ *    or punctuation mark separates them, so two people rewording the same sentence still block;
+ *  - two pure insertions at the same spot (both sides appended a line, added a list item, ...)
+ *    keep both, in an order fixed by the inserted text alone, so every device writes the same bytes.
+ *
+ * Everything else (edit against deletion, rewrites of the same words, mixed line endings,
+ * binary or invalid UTF-8 content, exceeded budgets) is returned as blocked and left to the
+ * conflict policy, which preserves both versions.
  */
 export function mergeTextThreeWay(
   baseBytes: ArrayBuffer,
@@ -75,10 +83,14 @@ export function mergeTextThreeWay(
 
   const localHunks = changesFromBase(base.value.lines, local.value.lines);
   const remoteHunks = changesFromBase(base.value.lines, remote.value.lines);
-  const mergedLines = mergeHunks(base.value.lines, localHunks, remoteHunks);
-  if (mergedLines === null) {
-    return blocked("overlapping-edits", "Both devices changed the same text region. Nyra will not write conflict markers automatically.");
+  const work: MergeWork = { cells: Math.min(limits.maxDiffCells, TOKEN_CELL_BUDGET), tokenMerges: 0, insertionMerges: 0 };
+  const merged = mergeHunkLists(base.value.lines, localHunks, remoteHunks, "line", work);
+  if (typeof merged === "string") {
+    return merged === "diff-too-complex"
+      ? blocked("diff-too-complex", "Merging the overlapping edits word by word exceeded the diff budget.")
+      : blocked("overlapping-edits", "Both devices changed the same text region. Nyra will not write conflict markers automatically.");
   }
+  const mergedLines = merged;
 
   const lineEnding = materializedLineEnding(chosenEol, mergedLines);
   const joined = mergedLines.join(eolString(lineEnding));
@@ -98,7 +110,9 @@ export function mergeTextThreeWay(
       remoteLines: remote.value.lines.length,
       localHunks: localHunks.length,
       remoteHunks: remoteHunks.length,
-      outputBytes: output.byteLength
+      outputBytes: output.byteLength,
+      tokenMerges: work.tokenMerges,
+      insertionMerges: work.insertionMerges
     }
   };
   return success;
@@ -276,35 +290,166 @@ function lcsSuffixLengths(
   return suffix;
 }
 
-function mergeHunks(base: readonly string[], local: readonly ChangeHunk[], remote: readonly ChangeHunk[]): string[] | null {
+type MergeFailure = "overlapping-edits" | "diff-too-complex";
+interface MergeWork { cells: number; tokenMerges: number; insertionMerges: number }
+/** Total word-level diff cells one merge may spend, on top of the per-side line budget. */
+const TOKEN_CELL_BUDGET = 16_000_000;
+const MAX_TOKENS_PER_REGION = 50_000;
+const TOKEN_PATTERN = /\n|[^\S\n]+|[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu;
+
+/**
+ * Merges two change lists over the same base. `level` "line" resolves interacting edits through
+ * resolveCluster (insertions at one spot, word-level retry); "token" never resolves them and also demands
+ * a separating unchanged word between edits of different sides.
+ */
+function mergeHunkLists(
+  base: readonly string[], local: readonly ChangeHunk[], remote: readonly ChangeHunk[], level: "line" | "token", work: MergeWork
+): string[] | MergeFailure {
   const output: string[] = [];
   let cursor = 0;
   let li = 0;
   let ri = 0;
+  let previous: { side: "l" | "r"; end: number } | null = null;
   while (li < local.length || ri < remote.length) {
     const l = li < local.length ? local[li]! : null;
     const r = ri < remote.length ? remote[ri]! : null;
 
     if (l && r && equivalentHunk(l, r)) {
+      if (l.start < cursor) return "overlapping-edits";
       appendBase(output, base, cursor, l.start);
       output.push(...l.replacement);
       cursor = l.end;
       li += 1;
       ri += 1;
+      previous = null;
       continue;
     }
-    if (l && r && hunksInteract(l, r)) return null;
+    if (l && r && hunksInteract(l, r)) {
+      if (level === "token") return "overlapping-edits";
+      // Grow the region while further edits of either side touch it, then resolve it as one unit.
+      let start = Math.min(l.start, r.start);
+      let end = Math.max(l.end, r.end);
+      const localCluster = [l];
+      const remoteCluster = [r];
+      li += 1;
+      ri += 1;
+      for (let grew = true; grew;) {
+        grew = false;
+        while (li < local.length && hunksInteract({ start, end, replacement: [] }, local[li]!)) {
+          localCluster.push(local[li]!); end = Math.max(end, local[li]!.end); start = Math.min(start, local[li]!.start); li += 1; grew = true;
+        }
+        while (ri < remote.length && hunksInteract({ start, end, replacement: [] }, remote[ri]!)) {
+          remoteCluster.push(remote[ri]!); end = Math.max(end, remote[ri]!.end); start = Math.min(start, remote[ri]!.start); ri += 1; grew = true;
+        }
+      }
+      if (start < cursor) return "overlapping-edits";
+      const resolved = resolveCluster(base, start, end, localCluster, remoteCluster, work);
+      if (typeof resolved === "string") return resolved;
+      appendBase(output, base, cursor, start);
+      output.push(...resolved);
+      cursor = end;
+      previous = null;
+      continue;
+    }
 
     const chooseLocal = l !== null && (r === null || compareHunkOrder(l, r) <= 0);
     const hunk = chooseLocal ? l! : r!;
-    if (hunk.start < cursor) return null;
+    if (hunk.start < cursor) return "overlapping-edits";
+    const side = chooseLocal ? "l" : "r";
+    if (level === "token" && previous && previous.side !== side && !hasSeparatingWord(base, previous.end, hunk.start)) return "overlapping-edits";
     appendBase(output, base, cursor, hunk.start);
     output.push(...hunk.replacement);
     cursor = hunk.end;
+    previous = { side, end: hunk.end };
     if (chooseLocal) li += 1; else ri += 1;
   }
   appendBase(output, base, cursor, base.length);
   return output;
+}
+
+/** True when an unchanged word or punctuation mark (not only blanks and line breaks) lies between two edits. */
+function hasSeparatingWord(base: readonly string[], from: number, to: number): boolean {
+  for (let index = from; index < to; index += 1) if (!/^\s+$/u.test(base[index]!)) return true;
+  return false;
+}
+
+function applyRegion(base: readonly string[], start: number, end: number, hunks: readonly ChangeHunk[]): string[] {
+  const out: string[] = [];
+  let position = start;
+  for (const hunk of hunks) {
+    appendBase(out, base, position, hunk.start);
+    out.push(...hunk.replacement);
+    position = hunk.end;
+  }
+  appendBase(out, base, position, end);
+  return out;
+}
+
+/** Combines the edits of both sides inside one interacting region, or reports why that is not safe. */
+function resolveCluster(
+  base: readonly string[], start: number, end: number, localCluster: readonly ChangeHunk[], remoteCluster: readonly ChangeHunk[], work: MergeWork
+): string[] | MergeFailure {
+  const l = localCluster[0]!;
+  const r = remoteCluster[0]!;
+  if (localCluster.length === 1 && remoteCluster.length === 1 && l.start === l.end && r.start === r.end && l.start === r.start) {
+    work.insertionMerges += 1;
+    return orderInsertions(l.replacement, r.replacement);
+  }
+
+  // Retry on words. Every line carries its own terminator so that an empty result stays distinguishable from one empty line.
+  const asText = (lines: readonly string[]): string => lines.map((line) => `${line}\n`).join("");
+  const baseTokens = tokenize(asText(base.slice(start, end)));
+  const localTokens = tokenize(asText(applyRegion(base, start, end, localCluster)));
+  const remoteTokens = tokenize(asText(applyRegion(base, start, end, remoteCluster)));
+  if (!baseTokens || !localTokens || !remoteTokens) return "overlapping-edits";
+  if (Math.max(baseTokens.length, localTokens.length, remoteTokens.length) > MAX_TOKENS_PER_REGION) return "diff-too-complex";
+  const cells = trimmedCells(baseTokens, localTokens) + trimmedCells(baseTokens, remoteTokens);
+  if (!Number.isSafeInteger(cells) || cells > work.cells) return "diff-too-complex";
+  work.cells -= cells;
+
+  const merged = mergeHunkLists(baseTokens, changesFromBase(baseTokens, localTokens), changesFromBase(baseTokens, remoteTokens), "token", work);
+  if (typeof merged === "string") return merged;
+  const text = merged.join("");
+  if (text !== "" && !text.endsWith("\n")) return "overlapping-edits";
+  work.tokenMerges += 1;
+  return text === "" ? [] : text.slice(0, -1).split("\n");
+}
+
+function tokenize(text: string): string[] | null {
+  const tokens = text.match(TOKEN_PATTERN) ?? [];
+  return tokens.join("") === text ? tokens : null;
+}
+
+/**
+ * Two insertions at the same spot keep both. The order depends only on the inserted lines, never on which
+ * device is "local", so any two devices merging the same pair write identical bytes. If one insertion already
+ * contains the other, the larger one is used instead of repeating lines.
+ */
+function orderInsertions(left: readonly string[], right: readonly string[]): string[] {
+  if (containsRun(left, right)) return [...left];
+  if (containsRun(right, left)) return [...right];
+  const first = compareLines(left, right) <= 0 ? left : right;
+  const second = first === left ? right : left;
+  return [...first, ...second];
+}
+
+function containsRun(haystack: readonly string[], needle: readonly string[]): boolean {
+  if (needle.length === 0) return true;
+  for (let offset = 0; offset + needle.length <= haystack.length; offset += 1) {
+    let matches = true;
+    for (let index = 0; index < needle.length; index += 1) if (haystack[offset + index] !== needle[index]) { matches = false; break; }
+    if (matches) return true;
+  }
+  return false;
+}
+
+function compareLines(left: readonly string[], right: readonly string[]): number {
+  const shared = Math.min(left.length, right.length);
+  for (let index = 0; index < shared; index += 1) {
+    if (left[index]! < right[index]!) return -1;
+    if (left[index]! > right[index]!) return 1;
+  }
+  return left.length - right.length;
 }
 
 function equivalentHunk(left: ChangeHunk, right: ChangeHunk): boolean {

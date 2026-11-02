@@ -16,6 +16,10 @@ export interface TextMergeStats {
   localHunks: number;
   remoteHunks: number;
   outputBytes: number;
+  /** Overlapping regions that were combined word by word. */
+  tokenMerges?: number;
+  /** Pairs of insertions at the same spot that were kept in a fixed order. */
+  insertionMerges?: number;
 }
 
 export type TextMergeBlockedReason =

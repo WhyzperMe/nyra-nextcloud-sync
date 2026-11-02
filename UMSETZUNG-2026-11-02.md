@@ -30,6 +30,15 @@ Getestet nur in `Obsidian/_NyraAcceptance/...`, der echte Vault-Ordner wurde nie
 - **Ergebnis:** `npm run e2e:live` 25/25 Szenarien im seriellen Modus und mit 4 Workern; `npm run acceptance:live` vollständig bestanden (inkl. Chunk-Upload v2, bedingtem DELETE, gleichzeitigen Writes).
 - **Server-Eigenart (nicht behebbar):** Der ETag einer Datei rückt nach einem Schreibvorgang verzögert vor (gemessen bis ca. 1 s). Zwei Clients, die dieselbe Datei innerhalb dieses Fensters schreiben, können sich überschreiben; die ältere Fassung bleibt nur in der Nextcloud-Versionshistorie.
 
+## Automatische Konfliktlösung (dritter Durchgang)
+
+Details und Garantien: `CONFLICT-RESOLUTION.md`.
+
+- **Merge-Engine:** (1) Bearbeitungen in verschiedenen Sätzen derselben Zeile werden auf Wortebene zusammengeführt, aber nur mit mindestens einem unveränderten Wort dazwischen; (2) zwei Einfügungen an derselben Stelle (beide hängen eine Zeile an) bleiben beide erhalten, in einer nur vom Text abhängigen Reihenfolge, sodass beide Geräte dieselben Bytes schreiben. Echtes Überlappen (gleiche Wörter umgeschrieben, Bearbeitung gegen Löschung, nur Leerzeichen dazwischen) bleibt blockiert.
+- **Entscheidungsregel:** Eine leere Datei ersetzt nie Inhalt; Zeitstempel mehr als 24 h in der Zukunft gelten nicht als „neuer“; jede Entscheidung trägt eine strukturierte Begründung (`basis`) im Log.
+- **Nachweis:** 6000 Zufallsdokumente (Symmetrie, Idempotenz, kein Wortverlust), Orakel-Test für getrennte Wort-Edits, drei absichtlich eingebaute Defekte werden von den Tests erkannt; Live: 28 von 28 Szenarien seriell und mit 4 Workern gegen den echten Server, darunter Absatz-Merge, beidseitiges Anhängen und leer-gegen-Inhalt.
+- **Bewusst nicht geändert:** Ohne gemeinsamen Vorfahren werden Textnotizen weiterhin nicht zusammengeführt (nur Zeichnungen), weil eine Vereinigung zweier unabhängiger Texte fremde Inhalte ungeordnet vermischen könnte. Jede Lösung scannt weiterhin beide Seiten neu (korrekt, aber bei vielen gleichzeitigen Konflikten langsam).
+
 ## Weiterhin offen
 
 - Der konkrete Galaxy-A52-Fehler ist nicht reproduziert; weder ein echtes Gerät noch ein Nextcloud-Testserver waren verfügbar. Die Änderungen garantieren nicht, dass dieser Fehler beseitigt ist. Bitte Plugin-, Obsidian- und Android-Version, genauen Fehlertext und das Ergebnis von Einstellungen → Diagnostics → Test this device's storage erfassen. Keine Inhalte oder Zugangsdaten teilen.

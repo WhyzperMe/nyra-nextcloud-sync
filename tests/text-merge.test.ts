@@ -29,9 +29,11 @@ describe("Bounded three-way text merge regression", () => {
     if (result.status === "blocked") expect(result.reason).toBe("overlapping-edits");
   });
 
-  it("blocks competing insertions at the same logical position", () => {
-    const result = mergeTextThreeWay(b("A\nB\n"), b("A\nL\nB\n"), b("A\nR\nB\n"), limits);
-    expect(result.status).toBe("blocked");
+  it("keeps both competing insertions at the same position, in an order that does not depend on the side", () => {
+    const forward = mergeTextThreeWay(b("A\nB\n"), b("A\nL\nB\n"), b("A\nR\nB\n"), limits);
+    const swapped = mergeTextThreeWay(b("A\nB\n"), b("A\nR\nB\n"), b("A\nL\nB\n"), limits);
+    expect(text(forward)).toBe("A\nL\nR\nB\n");
+    expect(text(swapped)).toBe(text(forward));
   });
 
   it("combines independent adjacent replacements and a boundary insert with a deletion", () => {

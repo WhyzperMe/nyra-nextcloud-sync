@@ -5,52 +5,78 @@ import type { SyncPlan, SyncPlanItem, SyncPlanStep } from "./types";
 /**
  * Autonomous conflict policy. Nothing here ever discards data:
  *
- *  - two different contents at one path: the newer one stays at the path (ties and unknown times
- *    fall back to the larger SHA-256, so every device decides the same way) and the other version
- *    is first preserved as a conflict copy that syncs like any other note;
+ *  - two different contents at one path: an empty file never replaces content; otherwise the clearly
+ *    newer one stays at the path (a modification time in the future is not evidence of being newer, and
+ *    ties or unknown times fall back to the larger SHA-256, so every device decides the same way);
+ *    the other version is first preserved as a conflict copy that syncs like any other note;
  *  - deleted on one side, changed on the other: the change wins and the file is restored;
  *  - renamed to different paths on both sides: the Nextcloud path wins, the local file follows it.
+ *
+ * Text that can be combined is merged before this policy is consulted (see merge/text-merge).
  */
+export type AutoResolutionBasis =
+  | "non-empty-content"
+  | "newer-modification"
+  | "content-tiebreak"
+  | "change-beats-delete"
+  | "remote-name";
+
 export type AutoResolution =
-  | { kind: "keep-local" | "keep-remote"; reason: string }
-  | { kind: "restore-local" | "restore-remote" | "adopt-remote-path"; reason: string };
+  | { kind: "keep-local" | "keep-remote"; reason: string; basis: AutoResolutionBasis }
+  | { kind: "restore-local" | "restore-remote" | "adopt-remote-path"; reason: string; basis: AutoResolutionBasis };
 
 /** Clock differences up to this many milliseconds are treated as "same time" (filesystem granularity, server rounding). */
 export const AUTO_RESOLUTION_TIME_TOLERANCE_MS = 2_000;
+/** A modification time further ahead of this device's clock than this is a wrong clock or a touched file, not a newer edit. */
+export const AUTO_RESOLUTION_FUTURE_LIMIT_MS = 24 * 60 * 60 * 1000;
 
-export function decideAutoResolution(item: SyncPlanItem, record: FileReplicaRecord): AutoResolution | null {
+export function decideAutoResolution(item: SyncPlanItem, record: FileReplicaRecord, now: number = Date.now()): AutoResolution | null {
   if (item.disposition !== "blocked" && item.disposition !== "merge-candidate") return null;
   const { local, remote, baseline } = record;
 
   if ((item.classification === "both-change" || item.classification === "concurrent-create") && local && remote) {
     if (local.path !== remote.path || !remote.contentHash || !remote.fileId || !remote.etag) return null;
     if (local.contentHash === remote.contentHash) return null;
-    const remoteTime = remote.mtimeMs;
-    const clearlyNewer = remoteTime !== null && Math.abs(local.mtimeMs - remoteTime) > AUTO_RESOLUTION_TIME_TOLERANCE_MS;
-    if (clearlyNewer) {
-      return local.mtimeMs > remoteTime
-        ? { kind: "keep-local", reason: "The version on this device is newer; the Nextcloud version is kept as a conflict copy." }
-        : { kind: "keep-remote", reason: "The Nextcloud version is newer; this device's version is kept as a conflict copy." };
+
+    // An empty file (a failed write, a freshly created note, an accidental clear) must never take the place of content.
+    if ((local.size === 0) !== (remote.size === 0)) {
+      return local.size === 0
+        ? { kind: "keep-remote", basis: "non-empty-content", reason: "This device's version is empty; the Nextcloud version with content is kept and the empty one is preserved as a conflict copy." }
+        : { kind: "keep-local", basis: "non-empty-content", reason: "The Nextcloud version is empty; this device's version with content is kept and the empty one is preserved as a conflict copy." };
+    }
+
+    const localTime = plausibleTime(local.mtimeMs, now);
+    const remoteTime = plausibleTime(remote.mtimeMs, now);
+    if (localTime !== null && remoteTime !== null && Math.abs(localTime - remoteTime) > AUTO_RESOLUTION_TIME_TOLERANCE_MS) {
+      return localTime > remoteTime
+        ? { kind: "keep-local", basis: "newer-modification", reason: "The version on this device is newer; the Nextcloud version is kept as a conflict copy." }
+        : { kind: "keep-remote", basis: "newer-modification", reason: "The Nextcloud version is newer; this device's version is kept as a conflict copy." };
     }
     return local.contentHash > remote.contentHash
-      ? { kind: "keep-local", reason: "Both versions are equally recent; the tie was broken deterministically and the other version is kept as a conflict copy." }
-      : { kind: "keep-remote", reason: "Both versions are equally recent; the tie was broken deterministically and the other version is kept as a conflict copy." };
+      ? { kind: "keep-local", basis: "content-tiebreak", reason: "Neither version is clearly newer; the tie was broken deterministically and the other version is kept as a conflict copy." }
+      : { kind: "keep-remote", basis: "content-tiebreak", reason: "Neither version is clearly newer; the tie was broken deterministically and the other version is kept as a conflict copy." };
   }
 
   if (item.classification === "delete-vs-change") {
     if (!local && remote && remote.fileId && remote.etag) {
-      return { kind: "restore-local", reason: "The file was deleted here but changed or renamed on Nextcloud; the change wins and the file is restored." };
+      return { kind: "restore-local", basis: "change-beats-delete", reason: "The file was deleted here but changed or renamed on Nextcloud; the change wins and the file is restored." };
     }
     if (local && !remote) {
-      return { kind: "restore-remote", reason: "The file was deleted on Nextcloud but changed or renamed here; the change wins and the file is restored." };
+      return { kind: "restore-remote", basis: "change-beats-delete", reason: "The file was deleted on Nextcloud but changed or renamed here; the change wins and the file is restored." };
     }
     return null;
   }
 
   if (item.classification === "rename-conflict" && local && remote && baseline && local.path !== remote.path) {
-    return { kind: "adopt-remote-path", reason: "Both sides renamed the file differently; the Nextcloud name is used on every device." };
+    return { kind: "adopt-remote-path", basis: "remote-name", reason: "Both sides renamed the file differently; the Nextcloud name is used on every device." };
   }
   return null;
+}
+
+/** A usable modification time, or null when it is unknown, not a number, not positive, or further in the future than a clock can be trusted. */
+function plausibleTime(mtimeMs: number | null, now: number): number | null {
+  if (mtimeMs === null || !Number.isFinite(mtimeMs) || mtimeMs <= 0) return null;
+  return mtimeMs > now + AUTO_RESOLUTION_FUTURE_LIMIT_MS ? null : mtimeMs;
 }
 
 /**

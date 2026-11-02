@@ -708,7 +708,7 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
           if (!current || !currentRecord || decideAutoResolution(current, currentRecord)?.kind !== decision.kind) continue;
           await this.applyCurrentSyncPlanInternal(false, "bidirectional", await makeAutoResolutionPlan(fresh, review.entryId, decision));
         }
-        this.logger.info("conflict.auto-resolved", { kind: decision.kind, classification: item.classification });
+        this.logger.info("conflict.auto-resolved", { kind: decision.kind, classification: item.classification, basis: decision.basis });
         void this.activity?.add([{ at: new Date().toISOString(), kind: "auto-resolved", path: review.path, detail: decision.reason }]);
         resolved += 1;
       } catch (error) {

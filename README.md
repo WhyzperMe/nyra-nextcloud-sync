@@ -8,7 +8,7 @@ Bidirectional Obsidian ↔ Nextcloud sync with verified writes, guarded deletion
 | **Everything is mirrored** | Notes, attachments, PDFs, images, any file type, nested folders, **empty folders**, renames |
 | **Deletions** | Deletions are mirrored with a **mass-deletion guard** for large batches. **Restore deleted files** can bring files back from retained copies or the Nextcloud trash bin, when available |
 | **History** | Browse, compare and restore **previous versions** of a note from Nextcloud |
-| **Conflicts** | Eligible non-overlapping text edits and Excalidraw drawings can be merged. When automatic resolution is enabled, Nyra attempts to preserve the other version in a conflict copy; a change wins over a deletion. Conflicts can also be reviewed with a **line diff** and Keep local / remote / both |
+| **Conflicts** | Text edits are merged line by line, and word by word inside a long line when an unchanged word separates them; two lines added at the same spot are both kept. Excalidraw drawings are merged element by element. When edits cannot be combined, Nyra keeps the clearly newer version (never an empty file over content) and saves the other as a conflict copy; a change wins over a deletion. Conflicts can also be reviewed with a **line diff** and Keep local / remote / both. Details: [CONFLICT-RESOLUTION.md](CONFLICT-RESOLUTION.md) |
 | **Scope** | Exclude files and folders with simple patterns, sync only chosen folders, cap file size, pause auto-sync |
 | **Mobile** | No Node/Electron APIs. Whole-file memory limits are enforced (32 MiB on mobile, 128 MiB on desktop); larger files are skipped on that device, never deleted or blocking |
 | **Activity** | The settings list what the last syncs did, what is waiting for approval and what was skipped |

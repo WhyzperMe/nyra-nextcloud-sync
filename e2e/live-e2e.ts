@@ -431,6 +431,59 @@ async function main(): Promise<void> {
       await until("ipad lost the auto conflict note", () => !B.walk("").files.some((name: string) => name.startsWith("AutoConflict")), 60_000);
     });
 
+    /** Two devices change one note while the iPad is offline, then the iPad syncs; returns once the server holds `expected`. */
+    async function divergeAndMerge(name: string, base: string, desktopEdit: string, ipadEdit: string, expected: string): Promise<void> {
+      await A.write(name, base);
+      await until(`${name} base on server`, async () => (await remoteText(name)) === base, 90_000);
+      await B.runSyncNow();
+      await until(`ipad has ${name}`, () => B.exists(name), 60_000);
+      await configure(B, (settings) => { settings.syncPaused = true; });
+      await A.write(name, desktopEdit);
+      await until(`desktop edit of ${name} on server`, async () => (await remoteText(name)) === desktopEdit, 90_000);
+      await B.write(name, ipadEdit);
+      await configure(B, (settings) => { settings.syncPaused = false; });
+      await until(`${name} merged on the server`, async () => { await B.runSyncNow(); return (await remoteText(name)) === expected; }, 120_000, 2000);
+      await A.runSyncNow(); await B.runSyncNow();
+      await until(`both devices hold the merged ${name}`, () => A.read(name).toString() === expected && B.read(name).toString() === expected, 90_000, 1500);
+      const stem = name.replace(/\.md$/, "");
+      const copies = [...(await remoteTree()).files.keys()].filter((p) => p.startsWith(stem) && p !== name);
+      if (copies.length > 0 || B.walk("").files.some((f: string) => f.startsWith(stem) && f !== name) || A.walk("").files.some((f: string) => f.startsWith(stem) && f !== name)) {
+        throw new Error(`A merge must not leave conflict copies, found: ${copies.join(", ")}`);
+      }
+      await A.removeRecursive(name);
+      await until(`${name} removed everywhere`, async () => !(await remoteTree()).files.has(name), 90_000);
+      await B.runSyncNow();
+      await until(`ipad dropped ${name}`, () => !B.exists(name), 60_000);
+    }
+
+    await step("edits to different sentences of one paragraph on both devices merge into one note, without a conflict copy", async () => {
+      const base = "# Paragraph\nThe quick brown fox jumps over the lazy dog. Later the dog sleeps near the river bank.\n";
+      await divergeAndMerge("Paragraph.md", base, base.replace("quick", "fast"), base.replace("river bank", "old mill"),
+        "# Paragraph\nThe fast brown fox jumps over the lazy dog. Later the dog sleeps near the old mill.\n");
+    });
+
+    await step("both devices appending a line to the same note keep both lines, without a conflict copy", async () => {
+      const base = "# Day Log\n- start\n";
+      await divergeAndMerge("DayLog.md", base, `${base}- phone entry\n`, `${base}- laptop entry\n`, "# Day Log\n- start\n- laptop entry\n- phone entry\n");
+    });
+
+    await step("an empty note created on one device never replaces a note with content created elsewhere", async () => {
+      await A.write("Race.md", "real content written on the desktop\n");
+      await configure(B, (settings) => { settings.syncPaused = true; });
+      await B.write("Race.md", "");
+      await until("race note with content on the server", async () => (await remoteText("Race.md")) === "real content written on the desktop\n", 90_000);
+      await configure(B, (settings) => { settings.syncPaused = false; });
+      await until("content wins on the ipad", async () => { await B.runSyncNow(); return B.exists("Race.md") && B.read("Race.md").toString() === "real content written on the desktop\n"; }, 120_000, 2000);
+      if ((await remoteText("Race.md")) !== "real content written on the desktop\n") throw new Error("The empty note replaced the content on the server.");
+      // The empty version is preserved as a conflict copy rather than discarded.
+      await until("empty version kept as a conflict copy", async () => B.walk("").files.some((f: string) => f.startsWith("Race (Nyra conflict") && B.read(f).length === 0), 90_000, 1500);
+      for (const name of B.walk("").files.filter((f: string) => f.startsWith("Race"))) await B.removeRecursive(name);
+      await B.runSyncNow();
+      await until("race notes removed on the server", async () => ![...(await remoteTree()).files.keys()].some((p) => p.startsWith("Race")), 120_000, 2000);
+      await A.runSyncNow();
+      await until("desktop dropped the race notes", () => !A.walk("").files.some((f: string) => f.startsWith("Race")), 90_000, 1500);
+    });
+
     const oversize = randomBytes(34 * 1024 * 1024); // above the iPad's 32 MiB whole-file limit
     await step("files above the iPad memory limit are skipped there without blocking anything else or being deleted", async () => {
       await A.write("Media/video.bin", oversize);

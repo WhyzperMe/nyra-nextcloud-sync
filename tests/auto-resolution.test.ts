@@ -3,7 +3,7 @@ import type { Logger } from "../src/diagnostics/logger";
 import { TransactionalSyncExecutor } from "../src/execution/executor";
 import type { LocalTransactionalMutator, PreparedLocalSnapshot } from "../src/execution/local-mutator";
 import type { RemoteDownloadStream, RemoteTransactionalMutator } from "../src/execution/remote-mutator";
-import { AUTO_RESOLUTION_TIME_TOLERANCE_MS, decideAutoResolution, makeAutoResolutionPlan } from "../src/planner/auto-resolution";
+import { AUTO_RESOLUTION_FUTURE_LIMIT_MS, AUTO_RESOLUTION_TIME_TOLERANCE_MS, decideAutoResolution, makeAutoResolutionPlan } from "../src/planner/auto-resolution";
 import { applyCollisionRepair, planCollisionRepair } from "../src/planner/collision-repair";
 import { SyncPlanner } from "../src/planner/planner";
 import type { SyncPlan } from "../src/planner/types";
@@ -178,6 +178,58 @@ describe("autonomous conflict policy", () => {
     expect(decideAutoResolution(converged.item, converged.record)).toBeNull();
   });
 
+  it("never lets an empty file replace content, whichever side is newer or wins the tie", async () => {
+    const make = async (localSize: number, remoteSize: number, localTime: number, remoteTime: number, localHash = HA, remoteHash = HB) => {
+      const { item, record } = await conflictItem({ localHash, remoteHash, localTime, remoteTime });
+      record.local!.size = localSize;
+      record.remote!.size = remoteSize;
+      return { item, record };
+    };
+    const emptyLocalNewer = await make(0, 40, 90_000, 20_000);
+    expect(decideAutoResolution(emptyLocalNewer.item, emptyLocalNewer.record)).toMatchObject({ kind: "keep-remote", basis: "non-empty-content" });
+    const emptyRemoteNewer = await make(40, 0, 20_000, 90_000);
+    expect(decideAutoResolution(emptyRemoteNewer.item, emptyRemoteNewer.record)).toMatchObject({ kind: "keep-local", basis: "non-empty-content" });
+    // Even when the hash tie-break would have picked the empty side.
+    const emptyWinsHash = await make(0, 40, 50_000, 50_000, H9, H1);
+    expect(decideAutoResolution(emptyWinsHash.item, emptyWinsHash.record)).toMatchObject({ kind: "keep-remote", basis: "non-empty-content" });
+    // Both empty or both with content is decided as before.
+    const bothContent = await make(40, 40, 90_000, 20_000);
+    expect(decideAutoResolution(bothContent.item, bothContent.record)).toMatchObject({ kind: "keep-local", basis: "newer-modification" });
+  });
+
+  it("does not treat a modification time far in the future as being newer", async () => {
+    const now = 1_700_000_000_000;
+    const future = now + AUTO_RESOLUTION_FUTURE_LIMIT_MS + 60_000;
+    const skewed = await conflictItem({ localHash: H1, remoteHash: H9, localTime: future, remoteTime: now - 5_000 });
+    // The future timestamp is ignored, so the comparison falls back to the content tie-break (H9 > H1 -> remote).
+    expect(decideAutoResolution(skewed.item, skewed.record, now)).toMatchObject({ kind: "keep-remote", basis: "content-tiebreak" });
+    const mirrored = await conflictItem({ localHash: H9, remoteHash: H1, localTime: now - 5_000, remoteTime: future });
+    expect(decideAutoResolution(mirrored.item, mirrored.record, now)).toMatchObject({ kind: "keep-local", basis: "content-tiebreak" });
+    // A time just inside the limit still counts.
+    const plausible = await conflictItem({ localTime: now + 3_600_000, remoteTime: now - 3_600_000 });
+    expect(decideAutoResolution(plausible.item, plausible.record, now)).toMatchObject({ kind: "keep-local", basis: "newer-modification" });
+    // Unusable times (0, negative) are treated as unknown too.
+    const zero = await conflictItem({ localHash: H1, remoteHash: H9, localTime: 0, remoteTime: now });
+    expect(decideAutoResolution(zero.item, zero.record, now)?.basis).toBe("content-tiebreak");
+  });
+
+  it("makes the same choice on both devices, which see the roles swapped", async () => {
+    const now = 1_700_000_000_000;
+    const cases: Array<[number, number, string, string, number, number]> = [
+      [10_000, 60_000, HA, HB, 40, 40], [60_000, 10_000, HB, HA, 40, 40], [50_000, 50_500, HA, HB, 40, 40], [now + AUTO_RESOLUTION_FUTURE_LIMIT_MS * 2, 5_000, HA, HB, 40, 40], [5_000, 6_000, HA, HB, 0, 12]
+    ];
+    for (const [localTime, remoteTime, localHash, remoteHash, localSize, remoteSize] of cases) {
+      const a = await conflictItem({ localHash, remoteHash, localTime, remoteTime });
+      a.record.local!.size = localSize; a.record.remote!.size = remoteSize;
+      const b = await conflictItem({ localHash: remoteHash, remoteHash: localHash, localTime: remoteTime, remoteTime: localTime });
+      b.record.local!.size = remoteSize; b.record.remote!.size = localSize;
+      const first = decideAutoResolution(a.item, a.record, now), second = decideAutoResolution(b.item, b.record, now);
+      // Device A keeps "local" exactly when device B keeps "remote": the same content stays at the path.
+      expect(first?.kind === "keep-local", JSON.stringify(cases)).toBe(second?.kind === "keep-remote");
+      expect(first?.basis).toBe(second?.basis);
+    }
+  });
+
   it("lets a change win over a deletion in both directions, and the Nextcloud name win a rename clash", async () => {
     const store = await openStore();
     const baseBytes = enc("base");
@@ -209,7 +261,7 @@ describe("autonomous conflict policy", () => {
     ]);
     const plan = await new SyncPlanner().build(store.getState());
     const steps = async (id: string, kind: "restore-local" | "restore-remote" | "adopt-remote-path"): Promise<string[]> => {
-      const built = await makeAutoResolutionPlan(plan, id, { kind, reason: "test" });
+      const built = await makeAutoResolutionPlan(plan, id, { kind, reason: "test", basis: "change-beats-delete" });
       expect(built.summary.destructiveSteps).toBe(0);
       expect(built.items[0]?.disposition).toBe("ready");
       return built.items[0]!.steps.map((step) => `${step.kind}:${step.sourcePath ?? ""}>${step.targetPath ?? ""}`);

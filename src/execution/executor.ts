@@ -431,7 +431,8 @@ export class TransactionalSyncExecutor {
     this.runtime.mergedFiles += 1;
     this.logger.info("apply.text-merge-completed", {
       entryId: record.entryId, path: item.displayPath, outputBytes: merged.stats.outputBytes,
-      localHunks: merged.stats.localHunks, remoteHunks: merged.stats.remoteHunks
+      localHunks: merged.stats.localHunks, remoteHunks: merged.stats.remoteHunks,
+      wordLevelMerges: merged.stats.tokenMerges ?? 0, sameSpotInsertions: merged.stats.insertionMerges ?? 0
     });
   }
 
