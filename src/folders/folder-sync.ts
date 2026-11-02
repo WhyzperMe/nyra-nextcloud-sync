@@ -24,6 +24,8 @@ export interface FolderSyncInput {
   allowDeletes: boolean;
   /** Deleting more folders than this in one run is held back for approval; undefined means no limit. */
   maxDeletes?: number;
+  /** Checks the freshly planned paths before any folder mutation. */
+  authorizeDeletes?: (local: readonly string[], remote: readonly string[]) => boolean;
 }
 
 export interface FolderOperation {
@@ -36,6 +38,8 @@ export interface FolderSyncResult {
   created: number;
   deleted: number;
   failed: number;
+  /** Folder deletions skipped this run because the folder is no longer empty or could not be checked safely; retried next sync. */
+  deferred: number;
   /** Folder deletions withheld because they exceeded `maxDeletes`. */
   held: number;
   operations: FolderOperation[];
@@ -65,7 +69,8 @@ export class FolderSyncService {
     let plan = planFolderSync({ ...facts, allowDeletes: input.allowDeletes });
     let held = 0;
     const planned = plan.deleteRemote.length + plan.deleteLocal.length;
-    if (input.maxDeletes !== undefined && planned > input.maxDeletes) {
+    const authorized = input.authorizeDeletes?.(plan.deleteLocal, plan.deleteRemote);
+    if (authorized === false || (authorized === undefined && input.maxDeletes !== undefined && planned > input.maxDeletes)) {
       // Too many folder removals for one sync: keep everything and let the user decide.
       held = planned;
       plan = planFolderSync({ ...facts, allowDeletes: false });
@@ -74,13 +79,15 @@ export class FolderSyncService {
       local: tree.folders.size, remote: input.remoteFolders.length,
       createRemote: plan.createRemote.length, createLocal: plan.createLocal.length, deleteRemote: plan.deleteRemote.length, deleteLocal: plan.deleteLocal.length, held
     });
-    const result: FolderSyncResult = { created: 0, deleted: 0, failed: 0, held, operations: [] };
+    const result: FolderSyncResult = { created: 0, deleted: 0, failed: 0, deferred: 0, held, operations: [] };
     const next = plan.nextBaseline;
 
     const attempt = async (action: string, operation: () => Promise<boolean>, onSuccess: () => void, onFailure: () => void): Promise<void> => {
       try {
         if (await operation()) { onSuccess(); return; }
-        onFailure(); // not empty any more: leave it for the file engine and retry later
+        result.deferred += 1;
+        this.logger.info("folders.operation-deferred", { action });
+        onFailure(); // no longer empty or no reliable delete precondition: retry later
       } catch (error) {
         result.failed += 1;
         onFailure();
@@ -103,7 +110,7 @@ export class FolderSyncService {
       await attempt("delete-local", async () => await this.ports.removeLocalFolderIfEmpty(path), deleted("local", path), () => { next.add(path); });
     }
     await this.baseline.save(next);
-    if (result.created + result.deleted + result.failed + held > 0) this.logger.info("folders.synced", { created: result.created, deleted: result.deleted, failed: result.failed, held });
+    if (result.created + result.deleted + result.failed + result.deferred + held > 0) this.logger.info("folders.synced", { created: result.created, deleted: result.deleted, failed: result.failed, deferred: result.deferred, held });
     return result;
   }
 }

@@ -105,8 +105,9 @@ export function createRedactedSupportReport(input: RedactedSupportReportInput): 
       } : null,
       execution: input.execution ? {
         status: input.execution.status,
-        active: input.execution.activeAction !== null && input.execution.activePath !== null,
+        active: (input.execution.activeOperations ?? 0) > 0 || (input.execution.activeAction !== null && input.execution.activePath !== null),
         activeAction: input.execution.activeAction,
+        activeOperations: input.execution.activeOperations ?? 0,
         completedSteps: input.execution.completedSteps,
         bytesProcessed: input.execution.bytesProcessed,
         lastCompletedAt: input.execution.lastCompletedAt
@@ -180,6 +181,8 @@ function pathSegmentCount(raw: string): number {
 function firstCategory(messages: readonly (string | null | undefined)[]): string | null {
   const message = messages.find((candidate) => Boolean(candidate));
   if (!message) return null;
+  if (/local apply manifest|apply\.manifest|local apply recovery/i.test(message)) return "local-apply-manifest";
+  if (/local staging/i.test(message)) return "local-staging";
   if (/auth|credential|password|unauthorized|\b401\b|\b403\b/i.test(message)) return "authentication";
   if (/etag|stale|precondition/i.test(message)) return "concurrency-precondition";
   if (/timeout|network|offline|fetch|connection/i.test(message)) return "network";

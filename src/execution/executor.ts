@@ -11,6 +11,8 @@ import { deriveFileSyncStatus } from "../sync/derived-status";
 import { planNextcloudChunks } from "../transfer/chunking";
 import type { TransferTuning } from "../transfer/types";
 import { assertPlanMatchesState } from "./preconditions";
+import { runTransferQueue } from "./transfer-waves";
+import { NyraError } from "../core/errors";
 import type { ExecutionMode, ExecutionPolicy, ExecutionReport, ExecutionRuntimeSummary, ExecutionStepResult } from "./types";
 import type { LocalTransactionalMutator, LocalWriteResult, PreparedLocalSnapshot } from "./local-mutator";
 import type { RemoteTransactionalMutator, TransferProgressCallback } from "./remote-mutator";
@@ -24,6 +26,8 @@ import type { RemoteTransactionalMutator, TransferProgressCallback } from "./rem
  */
 export class TransactionalSyncExecutor {
   private readonly mutex = new AsyncMutex();
+  private readonly baselineMutex = new AsyncMutex();
+  private readonly activeSteps = new Map<string, { action: ExecutionRuntimeSummary["activeAction"]; path: string; bytes: number; total: number | null }>();
   private closed = false;
   private runtime: ExecutionRuntimeSummary = emptyRuntime();
 
@@ -61,99 +65,93 @@ export class TransactionalSyncExecutor {
         bytesProcessed: 0, activeTransferBytes: 0, activeTransferTotalBytes: null,
         chunkedTransfers: 0, resumedTransfers: 0, rangedDownloads: 0,
         mergedFiles: 0, mergeConflicts: 0, lastError: null,
-        activeAction: null, activePath: null
+        activeAction: null, activePath: null, activeOperations: 0
       };
 
       const shadow = new Map<string, FileReplicaRecord>();
       for (const [id, record] of Object.entries(state.files)) shadow.set(id, structuredClone(record));
       const retired = new Set<string>();
       const results: ExecutionStepResult[] = [];
+      /** Items whose steps all finished and were verified; their physical effects are real even if a sibling later fails. */
+      const finishedEntries = new Set<string>();
+      let publicationAttempted = false;
 
       try {
         this.runtime.status = "running";
-        for (const item of executable) {
-          const record = shadow.get(item.entryId);
-          if (!record) throw new Error(`Planned entry '${item.entryId}' no longer exists in the execution snapshot.`);
-          let itemBlocked = false;
-          for (const step of item.steps) {
-            if (itemBlocked) {
-              results.push(result(item, step, "skipped", "Skipped because an earlier step for this entry was blocked."));
-              continue;
-            }
-            const mode = policy.mode ?? "bidirectional";
-            if (!stepAllowedInMode(step.kind, mode)) {
-              results.push(result(item, step, "blocked", `Step is outside the ${mode} execution boundary.`));
-              itemBlocked = true;
-              continue;
-            }
-            if (step.kind === "manual-resolution") {
-              results.push(result(item, step, "blocked", "This item requires explicit conflict resolution."));
-              itemBlocked = true;
-              continue;
-            }
-            if (step.kind === "merge-text" && !policy.allowMerge) {
-              results.push(result(item, step, "blocked", "Safe automatic text merge is disabled in settings."));
-              itemBlocked = true;
-              continue;
-            }
-            if (step.destructive && !policy.allowDestructive) {
-              results.push(result(item, step, "blocked", "Destructive execution is disabled by the execution policy."));
-              itemBlocked = true;
-              continue;
-            }
-            if (step.requiresFreshRemoteEtag && record.remote && !record.remote.etag) {
-              throw new Error(`Remote mutation/verification for '${item.displayPath}' requires an ETag, but Nextcloud did not provide one.`);
-            }
-            this.runtime.activeAction = actionForStep(step.kind);
-            this.runtime.activePath = step.targetPath ?? step.sourcePath ?? item.displayPath;
-            this.runtime.activeTransferBytes = 0;
-            this.runtime.activeTransferTotalBytes = expectedTransferSize(record, step);
-            this.onRuntimeChange?.();
-            try {
-              await this.executeStep(record, step, item, retired, policy);
-              results.push(result(item, step, "completed", step.kind === "merge-text"
-                ? "Conflict-free three-way text merge committed and verified on both replicas."
-                : "Completed with fresh preconditions and verified postconditions.", record));
-              this.runtime.completedSteps += 1;
-            } catch (error) {
-              if (error instanceof AutomaticMergeBlockedError) {
-                this.runtime.mergeConflicts += 1;
-                results.push(result(item, step, "blocked", error.message));
+        const limits = {
+          workers: policy.transferConcurrency ?? 1,
+          bytes: policy.transferMemoryBytes ?? 1,
+          chunkBytes: Math.max(1, this.tuning.uploadChunkBytes, this.tuning.downloadRangeChunkBytes)
+        };
+        this.activeSteps.clear();
+        const queueResults = await runTransferQueue(executable, shadow, limits, async (item) => {
+            this.assertOpen();
+            const itemResults: ExecutionStepResult[] = [];
+            const record = shadow.get(item.entryId);
+            if (!record) throw new Error(`Planned entry '${item.entryId}' no longer exists in the execution snapshot.`);
+            let itemBlocked = false;
+            for (const step of item.steps) {
+              this.assertOpen();
+              if (itemBlocked) {
+                itemResults.push(result(item, step, "skipped", "Skipped because an earlier step for this entry was blocked."));
+                continue;
+              }
+              const mode = policy.mode ?? "bidirectional";
+              if (!stepAllowedInMode(step.kind, mode)) {
+                itemResults.push(result(item, step, "blocked", `Step is outside the ${mode} execution boundary.`));
                 itemBlocked = true;
                 continue;
               }
-              throw error;
-            } finally {
-              this.runtime.activeAction = null;
-              this.runtime.activePath = null;
-              this.runtime.activeTransferBytes = 0;
-              this.runtime.activeTransferTotalBytes = null;
+              if (step.kind === "manual-resolution") {
+                itemResults.push(result(item, step, "blocked", "This item requires explicit conflict resolution."));
+                itemBlocked = true;
+                continue;
+              }
+              if (step.kind === "merge-text" && !policy.allowMerge) {
+                itemResults.push(result(item, step, "blocked", "Safe automatic text merge is disabled in settings."));
+                itemBlocked = true;
+                continue;
+              }
+              if (step.destructive && !policy.allowDestructive) {
+                itemResults.push(result(item, step, "blocked", "Destructive execution is disabled by the execution policy."));
+                itemBlocked = true;
+                continue;
+              }
+              if (step.requiresFreshRemoteEtag && record.remote && !record.remote.etag) {
+                throw new Error(`Remote mutation/verification for '${item.displayPath}' requires an ETag, but Nextcloud did not provide one.`);
+              }
+              this.activeSteps.set(item.entryId, { action: actionForStep(step.kind), path: step.targetPath ?? step.sourcePath ?? item.displayPath,
+                bytes: 0, total: expectedTransferSize(record, step) });
+              this.refreshActiveSteps();
               this.onRuntimeChange?.();
+              try {
+                if (step.kind === "establish-baseline") await this.baselineMutex.runExclusive(() => this.executeStep(record, step, item, retired, policy));
+                else await this.executeStep(record, step, item, retired, policy);
+                itemResults.push(result(item, step, "completed", step.kind === "merge-text"
+                  ? "Conflict-free three-way text merge committed and verified on both replicas."
+                  : "Completed with fresh preconditions and verified postconditions.", record));
+                this.runtime.completedSteps += 1;
+              } catch (error) {
+                if (error instanceof AutomaticMergeBlockedError) {
+                  this.runtime.mergeConflicts += 1;
+                  itemResults.push(result(item, step, "blocked", error.message));
+                  itemBlocked = true;
+                  continue;
+                }
+                throw error;
+              } finally {
+                this.activeSteps.delete(item.entryId);
+                this.refreshActiveSteps();
+                this.onRuntimeChange?.();
+              }
             }
-          }
-        }
-
-        // A watcher or other actor may have advanced durable inventory while the
-        // physical plan was running. Never publish observations against a new base.
-        await assertPlanMatchesState(plan, this.store.getState());
-        await this.store.transact("convergent-apply", (tx, base) => {
-          for (const [entryId, record] of shadow) {
-            if (retired.has(entryId)) {
-              tx.removeFile(entryId);
-              clearTombstones(tx, base, entryId);
-              continue;
-            }
-            const before = base.files[entryId];
-            if (!before) continue;
-            if (JSON.stringify(before) !== JSON.stringify(record)) {
-              tx.putFile({
-                entryId: record.entryId, path: record.path, baseline: record.baseline,
-                local: record.local, remote: record.remote, status: deriveFileSyncStatus(record)
-              });
-              clearTombstones(tx, base, entryId);
-            }
-          }
+            finishedEntries.add(item.entryId);
+            return itemResults;
         });
+        for (const entries of queueResults) results.push(...entries);
+
+        publicationAttempted = true;
+        await this.publishShadow(plan, shadow, retired, null);
 
         const finishedAt = new Date().toISOString();
         const report = summarize(plan, startedAt, finishedAt, results, this.runtime);
@@ -168,11 +166,63 @@ export class TransactionalSyncExecutor {
         });
         return report;
       } catch (error) {
+        this.activeSteps.clear();
+        this.refreshActiveSteps();
+        if (!publicationAttempted && finishedEntries.size > 0 && !this.closed) {
+          // Uploads/downloads that completed and were verified before a sibling failed are facts on disk and on the
+          // server. Recording them keeps the next plan from mistaking them for unrelated concurrent creations.
+          publicationAttempted = true;
+          try {
+            await this.publishShadow(plan, shadow, retired, finishedEntries);
+            this.logger.info("apply.partial-progress-published", { entries: finishedEntries.size });
+          } catch (publishError) {
+            this.logger.warn("apply.partial-progress-not-published", { error: publishError instanceof Error ? publishError.message : String(publishError) });
+          }
+        }
         this.runtime.status = "failed";
         this.runtime.lastError = error instanceof Error ? error.message : String(error);
         this.runtime.activePlanFingerprint = null;
         this.logger.error("apply.failed", { fingerprint: plan.fingerprint, error: this.runtime.lastError });
         throw error;
+      }
+    });
+  }
+
+  /**
+   * Publishes the verified outcome of the physical plan in one WAL transaction. With `only`, just those entries
+   * are recorded (partial progress after a failure); the plan anchor is checked again under the store mutex.
+   */
+  private async publishShadow(
+    plan: SyncPlan, shadow: Map<string, FileReplicaRecord>, retired: Set<string>, only: ReadonlySet<string> | null
+  ): Promise<void> {
+    // A watcher or other actor may have advanced durable inventory while the
+    // physical plan was running. Never publish observations against a new base.
+    this.assertOpen();
+    await assertPlanMatchesState(plan, this.store.getState());
+    await this.store.transact("convergent-apply", (tx, base) => {
+      this.assertOpen();
+      // Recheck under the store mutex: an inventory update can race the
+      // asynchronous fingerprint check immediately above.
+      if (base.storeId !== plan.storeId || base.generation !== plan.stateGeneration ||
+          base.lastWalSequence !== plan.walSequence || base.lastWalHash !== plan.walHash) {
+        throw new NyraError("sync-precondition-changed", "Sync plan changed before durable publication; fresh inventory is required.");
+      }
+      for (const [entryId, record] of shadow) {
+        if (only && !only.has(entryId)) continue;
+        if (retired.has(entryId)) {
+          tx.removeFile(entryId);
+          clearTombstones(tx, base, entryId);
+          continue;
+        }
+        const before = base.files[entryId];
+        if (!before) continue;
+        if (JSON.stringify(before) !== JSON.stringify(record)) {
+          tx.putFile({
+            entryId: record.entryId, path: record.path, baseline: record.baseline,
+            local: record.local, remote: record.remote, status: deriveFileSyncStatus(record)
+          });
+          clearTombstones(tx, base, entryId);
+        }
       }
     });
   }
@@ -187,7 +237,7 @@ export class TransactionalSyncExecutor {
     switch (step.kind) {
       case "verify-remote-content": {
         const remote = requireRemote(record);
-        const verified = await this.remote.verifyRemoteContent(this.remoteUrl(remote.path), remote.path, remote.fileId, remote.etag, this.transferProgress());
+        const verified = await this.remote.verifyRemoteContent(this.remoteUrl(remote.path), remote.path, remote.fileId, remote.etag, this.transferProgress(item.entryId));
         record.remote = verified.remote;
         this.runtime.bytesProcessed += verified.bytesTransferred;
         if (verified.ranged) this.runtime.rangedDownloads += 1;
@@ -202,7 +252,7 @@ export class TransactionalSyncExecutor {
           // A stale local create must not recreate remote folders before its source is verified.
           await this.remote.ensureParentDirectories(this.remoteBaseUrl(), targetPath);
           await snapshot.assertSourceUnchanged();
-          const uploaded = await this.remote.uploadCreateFromSnapshot(this.remoteUrl(targetPath), targetPath, snapshot, this.transferProgress());
+          const uploaded = await this.remote.uploadCreateFromSnapshot(this.remoteUrl(targetPath), targetPath, snapshot, this.transferProgress(item.entryId));
           record.remote = uploaded.remote;
           record.local = snapshotToLocal(snapshot);
           this.accountUpload(snapshot.size, uploaded.chunked, uploaded.resumed);
@@ -219,7 +269,7 @@ export class TransactionalSyncExecutor {
         const targetPath = step.targetPath ?? remote.path;
         const snapshot = await this.prepareUploadSnapshot(sourcePath, local.contentHash, local.size);
         try {
-          const uploaded = await this.remote.uploadUpdateFromSnapshot(this.remoteUrl(targetPath), targetPath, snapshot, remote.fileId, remote.etag, this.transferProgress());
+          const uploaded = await this.remote.uploadUpdateFromSnapshot(this.remoteUrl(targetPath), targetPath, snapshot, remote.fileId, remote.etag, this.transferProgress(item.entryId));
           record.remote = uploaded.remote;
           record.local = snapshotToLocal(snapshot);
           this.accountUpload(snapshot.size, uploaded.chunked, uploaded.resumed);
@@ -345,7 +395,7 @@ export class TransactionalSyncExecutor {
     ]);
     if (baseBytes && baseline && baseBytes.byteLength !== baseline.size) throw new Error(`Baseline size mismatch for '${item.displayPath}'.`);
 
-    const stream = await this.remote.openDownload(this.remoteUrl(remote.path), remote.path, remote.fileId, remote.etag, this.transferProgress());
+    const stream = await this.remote.openDownload(this.remoteUrl(remote.path), remote.path, remote.fileId, remote.etag, this.transferProgress(item.entryId));
     void stream.completed.catch(() => undefined);
     const remoteBytes = await collectBounded(stream.chunks, limits.maxInputBytes, item.displayPath);
     const remoteCompleted = await stream.completed;
@@ -367,7 +417,7 @@ export class TransactionalSyncExecutor {
     // guarded by fileId+ETag; the local write below is guarded by content hash.
     await this.local.readVerified(local.path, local.contentHash);
     const uploaded = await this.remote.uploadUpdate(
-      this.remoteUrl(remote.path), remote.path, merged.bytes, remote.fileId, remote.etag, null, this.transferProgress()
+      this.remoteUrl(remote.path), remote.path, merged.bytes, remote.fileId, remote.etag, null, this.transferProgress(item.entryId)
     );
     this.runtime.bytesProcessed += merged.bytes.byteLength;
 
@@ -386,12 +436,12 @@ export class TransactionalSyncExecutor {
   }
 
   private async downloadIntoLocal(
-    _record: FileReplicaRecord,
+    record: FileReplicaRecord,
     remote: RemoteReplicaState,
     targetPath: string,
     expectedTargetHash: string | null
   ): Promise<{ written: LocalWriteResult; remote: RemoteReplicaState }> {
-    const stream = await this.remote.openDownload(this.remoteUrl(remote.path), remote.path, remote.fileId, remote.etag, this.transferProgress());
+    const stream = await this.remote.openDownload(this.remoteUrl(remote.path), remote.path, remote.fileId, remote.etag, this.transferProgress(record.entryId));
     // Prevent an unhandled rejection if the async generator fails while the local
     // staging consumer is unwinding. The authoritative await still happens below.
     void stream.completed.catch(() => undefined);
@@ -423,12 +473,24 @@ export class TransactionalSyncExecutor {
     if (resumed) this.runtime.resumedTransfers += 1;
   }
 
-  private transferProgress(): TransferProgressCallback {
+  private transferProgress(entryId: string): TransferProgressCallback {
     return (transferredBytes, totalBytes) => {
-      this.runtime.activeTransferBytes = transferredBytes;
-      this.runtime.activeTransferTotalBytes = totalBytes;
+      const active = this.activeSteps.get(entryId);
+      if (!active) return;
+      active.bytes = transferredBytes;
+      active.total = totalBytes;
+      this.refreshActiveSteps();
       this.onRuntimeChange?.();
     };
+  }
+
+  private refreshActiveSteps(): void {
+    this.runtime.activeOperations = this.activeSteps.size;
+    const active = this.activeSteps.size === 1 ? this.activeSteps.values().next().value : undefined;
+    this.runtime.activeAction = active?.action ?? null;
+    this.runtime.activePath = active?.path ?? null;
+    this.runtime.activeTransferBytes = active?.bytes ?? 0;
+    this.runtime.activeTransferTotalBytes = active?.total ?? null;
   }
 
   private remoteBaseUrl(): string { return appendWebdavPath(this.webdavRootUrl, this.remoteRootPath); }

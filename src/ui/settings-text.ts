@@ -43,6 +43,9 @@ export function syncPresentation(owner: NyraNextcloudSyncPlugin): SyncPresentati
   } else if (waitingForQuiet && !busy && state === "Syncing") {
     const count = auto?.pendingLocalChanges ?? 0;
     detail = count > 0 ? `${plural(count, "local change event")} · waiting for edits to settle` : `Waiting for the quiet period · next check ${relativeFuture(auto?.nextRunAt ?? null)}`;
+  } else if (busy && (execution?.activeOperations ?? 0) > 1) {
+    detail = `${execution!.activeOperations} file operations running in parallel`;
+    progressLabel = `${execution!.completedSteps}/${execution!.totalSteps} verified steps · ${formatDurationSince(execution!.startedAt)}`;
   } else if (busy && execution?.activePath) {
     const action = execution.activeAction === "upload" ? "Uploading"
       : execution.activeAction === "download" ? "Downloading"

@@ -27,6 +27,45 @@ class BrokenReadAdapter extends MemoryVaultAdapter {
 }
 
 describe("Apply manifest on unreliable phone storage", () => {
+  it("rejects same-length corrupted staging bytes before moving the existing file", async () => {
+    class CorruptStaging extends MemoryVaultAdapter {
+      override async appendBinary(path: string, data: ArrayBuffer): Promise<void> {
+        if (path.includes("/apply/staging/")) {
+          const corrupted = new Uint8Array(data.slice(0));
+          if (corrupted.length) corrupted[0] = corrupted[0]! ^ 1;
+          return await super.appendBinary(path, corrupted.buffer);
+        }
+        return await super.appendBinary(path, data);
+      }
+    }
+    const adapter = new CorruptStaging();
+    const mutator = new LocalTransactionalMutator(makeMemoryVault(adapter), "nyra-nextcloud-sync", logs().logger, scope);
+    await mutator.initializeAndRecover();
+    const old = enc("precious");
+    await adapter.writeBinary("Keep.md", old);
+    await expect(mutator.writeAtomic("Keep.md", enc("replacement"), await sha256Hex(old))).rejects.toThrow(/staging read-back SHA-256/);
+    expect(new TextDecoder().decode(await adapter.readBinary("Keep.md"))).toBe("precious");
+  }, 15_000);
+
+  it("rejects a different valid manifest with the same byte length", async () => {
+    class WrongManifest extends MemoryVaultAdapter {
+      override async read(path: string): Promise<string> {
+        const value = await super.read(path);
+        return path.includes(journalPart) ? value.replace('"replace"', '"xxxxxxx"') : value;
+      }
+      override async readBinary(path: string): Promise<ArrayBuffer> {
+        if (path.includes(journalPart)) return enc(await this.read(path));
+        return await super.readBinary(path);
+      }
+    }
+    const adapter = new WrongManifest();
+    const mutator = new LocalTransactionalMutator(makeMemoryVault(adapter), "nyra-nextcloud-sync", logs().logger, scope);
+    await mutator.initializeAndRecover();
+    const old = enc("precious");
+    await adapter.writeBinary("Keep.md", old);
+    await expect(mutator.writeAtomic("Keep.md", enc("replacement"), await sha256Hex(old))).rejects.toThrow(/could not be verified/);
+    expect(new TextDecoder().decode(await adapter.readBinary("Keep.md"))).toBe("precious");
+  }, 30_000);
   it("falls back to another write strategy when staged files never read back", async () => {
     // Every temporary file reads back empty; the manifest at its final name reads back fine.
     const adapter = new BrokenReadAdapter((path) => path.endsWith(".tmp"));

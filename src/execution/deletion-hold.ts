@@ -21,21 +21,36 @@ const APPROVAL_TTL_MS = 15 * 60_000;
 
 /**
  * Remembers deletions that were held back for approval and the user's approval.
- * An approval covers up to the number of deletions the user was shown and expires,
- * so a later, larger surprise is held again.
+ * Approval is bound to the exact pending file and folder decisions.
  */
 export class DeletionHold {
   private fileDecision: DeleteGuardDecision | null = null;
   private detectedAt: string | null = null;
   private folderDeletes = 0;
-  private approval: { items: number; expiresAt: number } | null = null;
+  private fileKey: string | null = null;
+  private folderKey: string | null = null;
+  private fileReviewRequired = false;
+  private folderReviewRequired = false;
+  private approval: { fileKey: string | null; folderKey: string | null; items: number; expiresAt: number } | null = null;
 
   constructor(private readonly now: () => number = Date.now) {}
 
   /** Evaluates a plan and updates the pending state. Returns whether it is newly held. */
   evaluate(plan: SyncPlan, threshold: number, trackedFiles: number, sides?: ReplicaCounts): { decision: DeleteGuardDecision; newlyHeld: boolean } {
-    const decision = evaluateDeleteGuard(plan, { threshold, trackedFiles, approvedItems: this.approvedItems(), ...sides });
+    const key = fileDeletionKey(plan);
+    const hadFileApproval = this.approvedItems() > 0 && this.approval?.fileKey != null;
+    const approved = hadFileApproval && this.approval?.fileKey === key;
+    const decision = evaluateDeleteGuard(plan, { threshold, trackedFiles, approvedItems: approved ? this.approvedItems() : 0, ...sides });
+    // A changed batch must be reviewed again even if it now falls below the usual threshold.
+    if (hadFileApproval && !approved && decision.total > 0) this.fileReviewRequired = true;
+    if (decision.total === 0 || approved) this.fileReviewRequired = false;
+    if (this.fileReviewRequired && decision.total > 0) decision.held = true;
     const wasHeld = this.fileDecision !== null;
+    if (this.fileKey !== key && decision.total > 0) {
+      this.detectedAt = new Date(this.now()).toISOString();
+      if (this.approval?.fileKey !== key) this.approval = null;
+    }
+    this.fileKey = decision.total > 0 ? key : null;
     // An approval belongs to the deletions the user was shown; once they are gone it must not linger.
     if (decision.total === 0 && this.approval && this.folderDeletes === 0) this.approval = null;
     if (decision.held) {
@@ -54,14 +69,19 @@ export class DeletionHold {
     return this.approval.items;
   }
 
-  /** Folder removals allowed in one run: unlimited while approved, otherwise the threshold. */
+  /** Folder approvals are evaluated separately against their exact paths and directions. */
   folderLimit(threshold: number): number | undefined {
-    if (this.approvedItems() > 0 || threshold <= 0) return undefined;
+    if (threshold <= 0) return undefined;
     return threshold;
   }
 
-  setHeldFolders(count: number): void {
+  setHeldFolders(count: number, key: string | null = null): void {
+    if (count > 0 && this.folderKey !== key) {
+      this.detectedAt = new Date(this.now()).toISOString();
+      if (this.approval?.folderKey !== key) this.approval = null;
+    }
     this.folderDeletes = count;
+    this.folderKey = count > 0 ? key : null;
     if (count > 0) this.detectedAt ??= new Date(this.now()).toISOString();
     else if (this.fileDecision === null) this.detectedAt = null;
   }
@@ -85,7 +105,7 @@ export class DeletionHold {
   approve(): boolean {
     const pending = this.summary();
     if (!pending) return false;
-    this.approval = { items: Math.max(pending.total, 1), expiresAt: this.now() + APPROVAL_TTL_MS };
+    this.approval = { fileKey: this.fileDecision ? this.fileKey : null, folderKey: this.folderKey, items: Math.max(pending.total, 1), expiresAt: this.now() + APPROVAL_TTL_MS };
     return true;
   }
 
@@ -98,17 +118,34 @@ export class DeletionHold {
   autoApprove(graceMs: number, maxShare: number, trackedFiles: number): boolean {
     const pending = this.summary();
     if (!pending || this.approvedItems() > 0) return false;
-    if (pending.suspicious !== null || pending.pendingRemoteDeletes > 0) return false;
+    if (pending.suspicious !== null || pending.pendingRemoteDeletes > 0 || pending.folders > 0) return false;
     if (this.now() - Date.parse(pending.detectedAt) < graceMs) return false;
     if (trackedFiles <= 0 || pending.total > trackedFiles * maxShare) return false;
     return this.approve();
+  }
+
+  /**
+   * Called after approved file deletions ran. An approval that also covers held folders stays valid
+   * for the folder pass that follows in the same sync; otherwise the user would have to approve twice.
+   */
+  consumeFileApproval(): void {
+    this.fileDecision = null;
+    this.fileKey = null;
+    this.fileReviewRequired = false;
+    if (this.approval?.folderKey != null && this.folderDeletes > 0) this.approval = { ...this.approval, fileKey: null };
+    else this.approval = null;
+    if (this.folderDeletes === 0) this.detectedAt = null;
   }
 
   /** Called after a sync ran with an approval in force. */
   consumeApproval(): void {
     this.approval = null;
     this.fileDecision = null;
+    this.fileKey = null;
     this.folderDeletes = 0;
+    this.folderKey = null;
+    this.fileReviewRequired = false;
+    this.folderReviewRequired = false;
     this.detectedAt = null;
   }
 
@@ -116,4 +153,32 @@ export class DeletionHold {
   reset(): void { this.consumeApproval(); }
 
   hasApproval(): boolean { return this.approvedItems() > 0; }
+
+  hasFileApproval(plan: SyncPlan): boolean {
+    return this.approvedItems() > 0 && this.approval?.fileKey === fileDeletionKey(plan);
+  }
+
+  /** Called with a newly computed folder plan before any folder is removed. */
+  approveFolderPlan(local: readonly string[], remote: readonly string[], threshold: number): boolean {
+    const total = local.length + remote.length;
+    const key = JSON.stringify([ [...local].sort(), [...remote].sort() ]);
+    const hadFolderApproval = this.approvedItems() > 0 && this.approval?.folderKey != null;
+    const approved = total > 0 && hadFolderApproval && this.approval?.folderKey === key;
+    if (hadFolderApproval && !approved && total > 0) this.folderReviewRequired = true;
+    if (total === 0 || approved) this.folderReviewRequired = false;
+    if (total > 0 && !approved && ((threshold > 0 && total > threshold) || this.folderReviewRequired)) {
+      this.setHeldFolders(total, key);
+      return false;
+    }
+    this.setHeldFolders(0);
+    return true;
+  }
+}
+
+function fileDeletionKey(plan: SyncPlan): string {
+  const entries = plan.items.flatMap((item) => item.disposition === "blocked" || item.disposition === "noop" ? [] :
+    item.steps.filter((step) => step.kind === "delete-local" || step.kind === "delete-remote")
+      .map((step) => JSON.stringify([item.entryId, item.displayPath, item.baselinePath, item.localPath, item.remotePath, step.kind, step.sourcePath, step.targetPath])))
+    .sort();
+  return JSON.stringify([plan.storeId, plan.stateGeneration, plan.walSequence, plan.walHash, entries]);
 }

@@ -990,12 +990,20 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
       if (evaluation.decision.held) {
         allowDestructive = false;
         this.announceHeldDeletions(evaluation.newlyHeld);
-      } else approvalInForce = evaluation.decision.total > 0 && this.deletionHold.hasApproval();
+      } else approvalInForce = evaluation.decision.total > 0 && this.deletionHold.hasFileApproval(plan);
     }
 
     this.executionActive = true;
     this.refreshStatusBar();
     try {
+      // A watcher scan can have started after planning but before execution was
+      // reserved. Drain it before allocating transfer buffers; the watcher will
+      // not start another scan while executionActive is set. The executor also
+      // revalidates its durable plan after this wait.
+      await this.localInventory?.whenIdle();
+      if (!this.localFactsComplete || !this.remoteFactsComplete) {
+        throw new NyraError("sync-precondition-changed", "Inventory changed before execution; a fresh scan and plan are required.");
+      }
       const tuning = transferTuningFromSettings(settings);
       const remoteMutator = await this.createRemoteMutator(settings);
       const remoteMutation = mode !== "bootstrap-pull" && plan.items.some((item) =>
@@ -1033,6 +1041,8 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
         allowMerge: settings.autoMergeText || forceSafeMerge,
         mergeLimits: mergeLimitsFromSettings(settings),
         maxOperations: 10_000,
+        transferConcurrency: settings.transferConcurrency,
+        transferMemoryBytes: Math.min(settings.transferMemoryMiB * 1024 * 1024, this.platform.maxInFlightWholeReadBytes),
         mode
       });
       for (const result of report.results) {
@@ -1045,7 +1055,7 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
         }
       }
       this.lastExecutionSummary = executor.summary();
-      if (approvalInForce) this.deletionHold.consumeApproval();
+      if (approvalInForce) this.deletionHold.consumeFileApproval();
       await this.recordReport(report);
       return report;
     } catch (error) {
@@ -1318,16 +1328,14 @@ export default class NyraNextcloudSyncPlugin extends Plugin {
       createRemoteFolder: async (path) => await remote.ensureDirectoryPath(remoteBase, path),
       removeRemoteFolderIfEmpty: async (path) => await remote.removeEmptyDirectory(appendWebdavPath(remoteBase, path), path)
     }, new FolderBaselineStore(this.app.vault.adapter, baselinePath), this.logger);
-    const limit = this.deletionHold.folderLimit(settings.deleteConfirmThreshold);
+    const hadApproval = this.deletionHold.hasApproval();
     const input: Parameters<FolderSyncService["run"]>[0] = {
       remoteFolders: tree.folders.filter((folder) => policy.isFolderInScope(folder)),
       remoteFiles: tree.files,
-      allowDeletes
+      allowDeletes,
+      authorizeDeletes: (local, remote) => this.deletionHold.approveFolderPlan(local, remote, settings.deleteConfirmThreshold)
     };
-    if (limit !== undefined) input.maxDeletes = limit;
-    const hadApproval = this.deletionHold.hasApproval();
     const result = await service.run(input);
-    this.deletionHold.setHeldFolders(result.held);
     if (result.held > 0) this.announceHeldDeletions(true);
     if (hadApproval && result.held === 0 && this.deletionHold.summary() === null) this.deletionHold.consumeApproval();
     await this.activity?.add(result.operations.map((operation): ActivityEntry => ({

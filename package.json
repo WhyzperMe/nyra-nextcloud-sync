@@ -11,6 +11,7 @@
     "check": "npm run typecheck && npm test && node esbuild.config.mjs production",
     "e2e:live": "node scripts/run-live.mjs e2e/live-e2e.ts",
     "acceptance:live": "node scripts/run-live.mjs e2e/dav-acceptance.ts",
+    "bench:live": "node scripts/run-live.mjs e2e/live-bench.ts",
     "version": "node scripts/version-bump.mjs && git add manifest.json versions.json",
     "ui:preview": "node scripts/ui-preview.mjs ui-preview-out"
   },

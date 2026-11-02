@@ -1,14 +1,14 @@
 # Nyra Nextcloud Sync
 
-Bidirectional Obsidian ↔ Nextcloud sync with verified writes, safe merges and autonomous, loss-free conflict resolution. Works on desktop and on iPad/iPhone.
+Bidirectional Obsidian ↔ Nextcloud sync with verified writes, guarded deletions and conflict recovery. Supports desktop and mobile Obsidian; storage behavior depends on the device and server.
 
 | | |
 | --- | --- |
 | **Instant sync** | Edits are picked up after 1 second of quiet. Remote changes are found by polling (15 s, backing off to 2 min while idle, one cheap request when nothing changed) and immediately when Obsidian returns to the foreground |
 | **Everything is mirrored** | Notes, attachments, PDFs, images, any file type, nested folders, **empty folders**, renames |
-| **Deletions** | Deleting a file or folder deletes it on the other side and it does not come back. A **mass-deletion guard** holds large deletions for your approval; **Restore deleted files** brings them back from retained copies or the Nextcloud trash bin |
+| **Deletions** | Deletions are mirrored with a **mass-deletion guard** for large batches. **Restore deleted files** can bring files back from retained copies or the Nextcloud trash bin, when available |
 | **History** | Browse, compare and restore **previous versions** of a note from Nextcloud |
-| **Conflicts** | Non-overlapping text edits are merged automatically, also in very large notes, and **Excalidraw drawings are merged stroke by stroke** (even multi-megabyte ones). For everything else Nyra decides on its own and never discards data: the newer version stays, the other is saved next to it as a conflict copy; a change beats a deletion; duplicate paths are re-paired. Only genuine ambiguities are left for you, with a **line diff** and Keep local / remote / both |
+| **Conflicts** | Eligible non-overlapping text edits and Excalidraw drawings can be merged. When automatic resolution is enabled, Nyra attempts to preserve the other version in a conflict copy; a change wins over a deletion. Conflicts can also be reviewed with a **line diff** and Keep local / remote / both |
 | **Scope** | Exclude files and folders with simple patterns, sync only chosen folders, cap file size, pause auto-sync |
 | **Mobile** | No Node/Electron APIs. Whole-file memory limits are enforced (32 MiB on mobile, 128 MiB on desktop); larger files are skipped on that device, never deleted or blocking |
 | **Activity** | The settings list what the last syncs did, what is waiting for approval and what was skipped |
@@ -28,7 +28,7 @@ Use the same remote folder on every device. On a new device, run **Download vaul
 - Edit normally. Auto-sync coalesces edits and retries after outages.
 - **Sync now** (command palette or settings) runs a cycle immediately.
 - Conflicts are settled automatically (setting **Resolve conflicts automatically**, on by default). What remains offers **Keep local**, **Keep remote**, **Keep both** or **Retry safe merge**.
-- **Automatic deletes** is on by default. Switch it off in settings if you only want additions and edits to propagate. Whenever one sync would delete more than **Ask before deleting more than** items (default 20) or most of the vault, Nyra waits for your approval (settings → Activity, or the command **Approve pending deletions**).
+- **Automatic deletes** is on by default. Switch it off in settings if you only want additions and edits to propagate. Whenever one sync would delete more than **Ask before deleting more than** items (default 20) or most of the vault, Nyra holds the batch. Automatically approving a held batch is an optional setting, off on new installs; a choice you already saved is retained when upgrading. When that option is off, approve held deletions in settings → Activity or with **Approve pending deletions**.
 - **Restore deleted files…** and **Show previous versions of the current note** are in the command palette.
 - The **Files** tab lets you tick or untick any file or folder in a tree view (this device and Nextcloud together); unticked items are left alone on both sides. Under **Rules and limits** you can also exclude patterns (`*.tmp`, `Private/`, `node_modules`, `/Inbox`, `Attachments/**/raw`), restrict sync to folders, skip files above a size and pause auto-sync.
 - iOS suspends apps in the background; opening Obsidian triggers an immediate sync.
@@ -36,9 +36,12 @@ Use the same remote folder on every device. On a new device, run **Download vaul
 ## Limits
 
 - Files above the device memory limit (or your own size limit) are not synced from/to that device. The Activity panel lists them.
+- File and folder deletion depends on Obsidian's storage adapter on the device and, for remote items, the Nextcloud server's WebDAV behavior. Mobile storage providers and servers can differ, so sync cannot guarantee every deletion behaves identically everywhere.
+- Advanced transfer settings offer opt-in parallel file transfers. The default is one transfer; a per-device capped, estimated memory budget limits concurrent work, and a single large file runs alone. The estimate is not a hard process-memory limit. Conflicting paths, moves, merges and deletions remain serialized. Android device behavior has not been established by the offline tests.
 - Previous versions need Nextcloud's *Versions* app; "replace in place" only works for notes without unsynced changes.
-- Folder deletion on Nextcloud is a WebDAV collection delete that is only issued after a fresh listing shows the folder empty; a file added in the milliseconds in between would end up in the Nextcloud trash bin.
-- The server must reject stale conditional writes (`If-Match`) correctly. Nyra probes this before writing and pauses writes if the server misbehaves.
+- Folder deletion on Nextcloud cannot be atomic in WebDAV. Nyra tests once per session whether the server really enforces `If-Match` on collections. If it does, the delete is conditioned on the listing's ETag and deferred when it went stale. If it does not (some storage backends answer 412 even for the current tag), the folder must show up empty in two listings a moment apart with an unchanged ETag before it is deleted. That narrows the race with concurrent additions but cannot close it; anything caught goes to the Nextcloud trash bin if that is configured.
+- The server must reject stale conditional writes (`If-Match`) correctly. Nyra probes this before writing and pauses writes if the server misbehaves. Some storage backends advance a file's ETag with a delay (about one second was measured on one server); two clients writing the same file inside that window cannot be told apart, and the older version then survives only in Nextcloud's version history.
+- Sync is not a backup. Keep an independent backup of important vault data; retained copies, Nextcloud trash, and version history depend on local storage and server configuration and may not always be available.
 
 ## Development
 

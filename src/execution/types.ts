@@ -12,6 +12,9 @@ export interface ExecutionPolicy {
   /** Bounded merge limits. Required only when allowMerge is true; safe defaults exist for tests. */
   mergeLimits?: TextMergeLimits;
   maxOperations: number;
+  /** Limits for independent transfer waves. Omit for the serial safety fallback. */
+  transferConcurrency?: number;
+  transferMemoryBytes?: number;
   /** Bootstrap modes deliberately permit only one non-destructive transfer direction. */
   mode?: ExecutionMode;
 }
@@ -50,6 +53,8 @@ export interface ExecutionRuntimeSummary {
   activePlanFingerprint: string | null;
   activeAction: "upload" | "download" | "verify" | "merge" | null;
   activePath: string | null;
+  /** Number of physical steps currently in progress, without exposing paths. */
+  activeOperations?: number;
   startedAt: string | null;
   lastCompletedAt: string | null;
   completedSteps: number;

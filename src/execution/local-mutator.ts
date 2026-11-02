@@ -219,6 +219,9 @@ export class LocalTransactionalMutator {
         stagedStat = await this.adapter.stat(stagingPath);
       }
       if (!stagedStat || stagedStat.type !== "file" || stagedStat.size !== desiredSize) throw new Error("Local staging postcondition failed.");
+      if (!await settles(() => this.pathHasHash(stagingPath, committedHash, desiredSize), [50, 150, 400, 1000, 2000])) {
+        throw new Error("Local staging read-back SHA-256 verification failed.");
+      }
 
       manifest = {
         version: 2, operationId, kind: "replace", sourcePath: null, targetPath, stagingPath, recoveryPath,
@@ -256,6 +259,11 @@ export class LocalTransactionalMutator {
           throw new Error(`Local source '${targetPath}' changed before replacement; its current version was preserved.`);
         }
       }
+      // A create checked the path before the (possibly long) transfer. Check again immediately before
+      // the rename so a file the user made meanwhile is never overwritten by an adapter that allows it.
+      if (!recoveryPath && await this.adapter.exists(targetPath)) {
+        throw new Error(`Local create precondition failed: '${targetPath}' appeared during the transfer; its current version was preserved.`);
+      }
       await this.adapter.rename(stagingPath, targetPath);
       if (!await this.pathHasHash(targetPath, committedHash, desiredSize)) throw new Error(`Local replace hash verification failed for '${targetPath}'.`);
       const finalStat = await this.adapter.stat(targetPath);
@@ -277,6 +285,17 @@ export class LocalTransactionalMutator {
         return { path: targetPath, contentHash: committedHash, size: desiredSize, mtimeMs: finalStat.mtime };
       }
       let rollbackSucceeded = false;
+      if (!manifest.recoveryPath && await this.createLostToForeignFile(manifest)) {
+        // The staged bytes never became visible and a different file owns the path: nothing to roll back.
+        // Drop the intent record so a restart is not blocked by a transaction that can never complete.
+        try {
+          await this.removeVerifiedStaging(manifest);
+          await this.removeManifestIfPresent(manifestPath);
+        } catch (cleanupError) {
+          this.logger.warn("apply.local-create-cleanup-failed", { operationId, error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) });
+        }
+        throw error;
+      }
       if (manifest.recoveryPath) {
         try { await this.rollbackReplace(manifest); rollbackSucceeded = true; }
         catch (rollbackError) {
@@ -422,6 +441,14 @@ export class LocalTransactionalMutator {
         this.logger.warn("apply.local-recovered-before-replace", { operationId: manifest.operationId, targetPath: manifest.targetPath });
         return;
       }
+      if (await this.createLostToForeignFile(manifest)) {
+        // A create never moved anything aside, so a different file at the target is the user's. It wins;
+        // the verified staged copy is regenerable from the replica it came from.
+        await this.removeVerifiedStaging(manifest);
+        await this.adapter.remove(manifestPath);
+        this.logger.warn("apply.local-recovered-create-lost-race", { operationId: manifest.operationId, targetPath: manifest.targetPath });
+        return;
+      }
       if (manifest.expectedSourceHash === null && !(await this.adapter.exists(manifest.targetPath)) && manifest.stagingPath && await this.adapter.exists(manifest.stagingPath)) {
         if (!(await this.pathHasHash(manifest.stagingPath, manifest.desiredHash, desiredSize))) {
           throw new Error("Local staging bytes do not match the recorded desired hash; preserving all evidence.");
@@ -521,6 +548,16 @@ export class LocalTransactionalMutator {
     }
   }
 
+  /** True for a create whose staged file is still unmoved while some other file occupies the target path. */
+  private async createLostToForeignFile(manifest: ApplyManifest): Promise<boolean> {
+    if (manifest.kind !== "replace" || manifest.expectedSourceHash !== null || manifest.recoveryPath !== null || !manifest.stagingPath) return false;
+    const desiredSize = manifest.version === 2 ? manifest.desiredSize : undefined;
+    const [stagingExists, targetExists] = await Promise.all([this.adapter.exists(manifest.stagingPath), this.adapter.exists(manifest.targetPath)]);
+    if (!stagingExists || !targetExists) return false;
+    // If the target is exactly the desired content, it is the committed result, not a foreign file.
+    return !(await this.pathHasHash(manifest.targetPath, manifest.desiredHash, desiredSize).catch(() => true));
+  }
+
   private async removeVerifiedRecovery(manifest: ApplyManifest): Promise<void> {
     if (!manifest.recoveryPath || !(await this.adapter.exists(manifest.recoveryPath))) return;
     const expectedSize = manifest.version === 3 ? manifest.desiredSize : undefined;
@@ -568,8 +605,7 @@ export class LocalTransactionalMutator {
   /**
    * Writes the crash-recovery manifest and proves it is durable. Phone storage is the hard case: reading a
    * file straight after writing it can return a stale, empty or re-encoded result. The write therefore tries
-   * several independent strategies (text staged, binary staged, direct binary, and finally a size-and-parse
-   * check), and every failure is recorded with what the storage actually returned, so an error names its
+   * several independent strategies (text staged, binary staged, and direct binary), and every failure is recorded with what the storage actually returned, so an error names its
    * cause instead of just saying that verification failed.
    *
    * Returns false only when `optional` is set and no strategy could be proven; callers set it for operations
@@ -581,11 +617,11 @@ export class LocalTransactionalMutator {
     const data = JSON.stringify(manifest);
     const bytes = new TextEncoder().encode(data);
     const notes: string[] = [];
-    const strategies: Array<{ name: string; staged: boolean; write: (target: string) => Promise<void>; relaxed?: boolean }> = [
+    const diagnostics: Array<Record<string, string | number | null>> = [];
+    const strategies: Array<{ name: string; staged: boolean; write: (target: string) => Promise<void> }> = [
       { name: "text-staged", staged: true, write: async (target) => { await this.adapter.write(target, data); } },
       { name: "binary-staged", staged: true, write: async (target) => { await this.adapter.writeBinary(target, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer); } },
-      { name: "binary-direct", staged: false, write: async (target) => { await this.adapter.writeBinary(target, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer); } },
-      { name: "size-only", staged: false, relaxed: true, write: async (target) => { await this.adapter.write(target, data); } }
+      { name: "binary-direct", staged: false, write: async (target) => { await this.adapter.writeBinary(target, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer); } }
     ];
     const order = strategies.map((_, index) => (index + this.manifestStrategyStart) % strategies.length);
     for (const index of order) {
@@ -596,37 +632,39 @@ export class LocalTransactionalMutator {
       try {
         if (!strategy.staged && await this.adapter.exists(path)) await this.adapter.remove(path);
         await strategy.write(stagePath);
-        const staged = await this.manifestReadsBack(stagePath, data, bytes, strategy.relaxed === true);
-        if (!staged.ok) { notes.push(`${strategy.name}: ${staged.note}`); continue; }
+        const staged = await this.manifestReadsBack(stagePath, data, bytes);
+        if (!staged.ok) { notes.push(`${strategy.name}: ${staged.note}`); diagnostics.push({ strategy: strategy.name, phase: "write", ...staged.diagnostic }); continue; }
         if (strategy.staged) {
           committing = true;
           await this.adapter.rename(stagePath, path);
           committing = false;
-          const committed = await this.manifestReadsBack(path, data, bytes, false);
-          if (!committed.ok) { notes.push(`${strategy.name} (after rename): ${committed.note}`); continue; }
+          const committed = await this.manifestReadsBack(path, data, bytes);
+          if (!committed.ok) { notes.push(`${strategy.name} (after rename): ${committed.note}`); diagnostics.push({ strategy: strategy.name, phase: "rename", ...committed.diagnostic }); continue; }
         }
-        if (notes.length > 0) this.logger.warn("apply.manifest-needed-fallback", { strategy: strategy.name, earlier: notes });
+        if (notes.length > 0) this.logger.warn("apply.manifest-needed-fallback", { strategy: strategy.name, diagnostics });
         this.manifestStrategyStart = index;
         return true;
       } catch (error) {
         // A failing rename may or may not have committed; that ambiguity is the caller's to resolve, never retried here.
         if (committing) throw error;
         notes.push(`${strategy.name}: ${error instanceof Error ? error.message : String(error)}`);
+        diagnostics.push({ strategy: strategy.name, phase: "exception" });
       } finally {
         try { if (strategy.staged && await this.adapter.exists(temp)) await this.adapter.remove(temp); } catch { /* the temp name is unique; a later sweep removes leftovers */ }
       }
     }
     // Nothing proved durable: do not leave a half-written manifest that recovery would choke on.
     try { if (await this.adapter.exists(path)) await this.adapter.remove(path); } catch { /* best effort */ }
-    this.logger.error("apply.manifest-unverifiable", { path, notes });
+    this.logger.error("apply.manifest-unverifiable", { path, diagnostics });
     this.manifestStrategyStart = 0;
     if (optional) { this.manifestSkipOptional = 25; return false; }
     throw new Error(`Local apply manifest could not be verified on this device (${notes.join(" | ")}).`);
   }
 
   /** Reads the file back the ways a phone might manage and explains what it saw when none matches. */
-  private async manifestReadsBack(target: string, data: string, bytes: Uint8Array, relaxed: boolean): Promise<{ ok: boolean; note: string }> {
+  private async manifestReadsBack(target: string, data: string, bytes: Uint8Array): Promise<{ ok: boolean; note: string; diagnostic: Record<string, number | null> }> {
     let note = "";
+    let diagnostic: Record<string, number | null> = {};
     const ok = await settles(async () => {
       const seen: string[] = [];
       let text: string | null = null;
@@ -637,17 +675,15 @@ export class LocalTransactionalMutator {
       if (binary && (equalBytes(binary, bytes) || sameJson(new TextDecoder().decode(binary), data))) return true;
       let size: number | null = null;
       try { size = (await this.adapter.stat(target))?.size ?? null; } catch { /* reported below */ }
-      if (relaxed && size === bytes.byteLength && text !== null) {
-        try { JSON.parse(text); return true; } catch { /* fall through to the diagnosis */ }
-      }
       const exists = await this.adapter.exists(target).catch(() => false);
+      diagnostic = { expectedBytes: bytes.byteLength, statBytes: size, textChars: text?.length ?? null, binaryBytes: binary?.byteLength ?? null };
       seen.push(`exists=${exists}`, `stat=${size ?? "none"} of ${bytes.byteLength} bytes`);
       seen.push(text === null ? "text=none" : `text=${text.length} of ${data.length} chars${firstDifference(text, data)}`);
       seen.push(binary ? `binary=${binary.byteLength} bytes` : "binary=none");
       note = seen.join(", ");
       return false;
     }, [50, 150, 400, 1000, 2000]);
-    return { ok, note };
+    return { ok, note, diagnostic };
   }
 
   private parseApplyManifest(manifestPath: string, raw: unknown): ApplyManifest {

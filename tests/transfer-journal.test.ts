@@ -36,6 +36,37 @@ class ExcessiveOperationListingAdapter extends MemoryVaultAdapter {
 }
 
 describe("transfer journal cleanup safety", () => {
+  it("does not remove an operation while another worker is reading the journal inventory", async () => {
+    let resume!: () => void, signalRead!: () => void;
+    const paused = new Promise<void>((resolve) => { resume = resolve; });
+    const reading = new Promise<void>((resolve) => { signalRead = resolve; });
+    class PausedReadAdapter extends MemoryVaultAdapter {
+      pauseNext = false;
+      override async read(path: string): Promise<string> {
+        if (this.pauseNext && path.endsWith("/00000001.json")) {
+          this.pauseNext = false;
+          signalRead();
+          await paused;
+        }
+        return await super.read(path);
+      }
+    }
+    const adapter = new PausedReadAdapter();
+    const journal = makeJournal(adapter);
+    await journal.create(payload());
+    adapter.pauseNext = true;
+    const inventory = journal.listLatest();
+    await reading;
+    // Diagnostics and execution can open separate stores over the same adapter.
+    const removal = makeJournal(adapter).remove(OPERATION_KEY);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await adapter.exists(`${JOURNAL_DIR}/00000001.json`)).toBe(true);
+    resume();
+    expect((await inventory)).toHaveLength(1);
+    await removal;
+    expect(await journal.load(OPERATION_KEY)).toBeNull();
+  });
+
   it("preserves temporary and unknown evidence during reads and cleanup", async () => {
     const adapter = new MemoryVaultAdapter();
     const journal = makeJournal(adapter);

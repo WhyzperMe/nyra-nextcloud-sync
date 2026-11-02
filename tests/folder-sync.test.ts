@@ -3,6 +3,7 @@ import { occupiedDirectories, planFolderSync } from "../src/folders/folder-plan"
 import { FolderSyncService, type FolderSyncPorts, type LocalTree } from "../src/folders/folder-sync";
 import { FolderBaselineStore } from "../src/folders/folder-baseline";
 import { MemoryVaultAdapter } from "./helpers/memory-vault";
+import { DeletionHold } from "../src/execution/deletion-hold";
 
 const set = (...values: string[]): Set<string> => new Set(values);
 const none = set();
@@ -135,6 +136,25 @@ describe("folder sync service", () => {
     const allowed = await new FolderSyncService(world.ports, store, logger).run({ remoteFolders: [...world.remote], remoteFiles: [], allowDeletes: true });
     expect(allowed).toMatchObject({ held: 0, deleted: 4 });
     expect(world.remote.size).toBe(0);
+  });
+
+  it("rechecks the exact approved folder plan before deleting", async () => {
+    const world = new FakeWorld();
+    world.remote.add("A"); world.remote.add("B");
+    const store = new FolderBaselineStore(new MemoryVaultAdapter(), "f.json");
+    await store.save(new Set(["A", "B", "C"]));
+    const hold = new DeletionHold();
+    const service = new FolderSyncService(world.ports, store, logger);
+    const run = () => service.run({ remoteFolders: [...world.remote], remoteFiles: [], allowDeletes: true,
+      authorizeDeletes: (local, remote) => hold.approveFolderPlan(local, remote, 1) });
+    expect((await run()).held).toBe(2);
+    expect(hold.approve()).toBe(true);
+    world.remote.delete("B"); world.remote.add("C");
+    await store.save(new Set(["A", "B", "C"]));
+    expect((await run()).held).toBe(2);
+    expect([...world.remote].sort()).toEqual(["A", "C"]);
+    expect(hold.approve()).toBe(true);
+    expect((await run()).deleted).toBe(2);
   });
 
   it("treats a damaged baseline as empty so nothing is deleted", async () => {

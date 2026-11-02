@@ -28,6 +28,8 @@ export interface PluginSettings {
   serverUrl: string;
   remoteRootPath: string;
   remoteDirectoryConcurrency: number;
+  transferConcurrency: number;
+  transferMemoryMiB: number;
   transferChunkUploadThresholdMiB: number;
   transferUploadChunkMiB: number;
   transferDownloadRangeMiB: number;
@@ -75,6 +77,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   serverUrl: "",
   remoteRootPath: "Obsidian",
   remoteDirectoryConcurrency: 6,
+  transferConcurrency: 1,
+  transferMemoryMiB: 32,
   transferChunkUploadThresholdMiB: 16,
   transferUploadChunkMiB: 16,
   transferDownloadRangeMiB: 8,
@@ -94,7 +98,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   fastRemoteCheck: true,
   autoMergeText: true,
   autoResolveConflicts: true,
-  autoApproveHeldDeletions: true,
+  autoApproveHeldDeletions: false,
   autoMergeMaxMiB: 16,
   serverHealthCheckSeconds: 60,
   connectionState: "disconnected",
@@ -120,6 +124,8 @@ export function normalizeSettings(raw: unknown): PluginSettings {
     serverUrl: typeof raw.serverUrl === "string" ? raw.serverUrl : "",
     remoteRootPath: safeRemoteRoot(raw.remoteRootPath),
     remoteDirectoryConcurrency: safeInteger(raw.remoteDirectoryConcurrency, 1, 16, DEFAULT_SETTINGS.remoteDirectoryConcurrency),
+    transferConcurrency: safeInteger(raw.transferConcurrency, 1, 8, DEFAULT_SETTINGS.transferConcurrency),
+    transferMemoryMiB: safeInteger(raw.transferMemoryMiB, 1, 512, DEFAULT_SETTINGS.transferMemoryMiB),
     transferChunkUploadThresholdMiB: threshold,
     transferUploadChunkMiB: uploadChunk,
     transferDownloadRangeMiB: rangeChunk,

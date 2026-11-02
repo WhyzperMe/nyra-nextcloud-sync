@@ -7,20 +7,28 @@ import type { TransferJournalPayload, TransferJournalRecord } from "./types";
 import { randomId } from "../state/durable/ids";
 import { getPluginDeviceRuntimeRoot } from "../platform/device-scope";
 import { NEXTCLOUD_MAX_CHUNKS } from "./chunking";
+import { AsyncMutex } from "../state/durable/mutex";
 
 const RECORD_FILE = /^(\d{8})\.json$/;
 const TRANSFER_PHASES = new Set(["prepared","upload-created","uploading","assembling","temp-ready","backup-moving","backup-ready","installing","installed","verified","complete"]);
 const MAX_TRANSFER_OPERATIONS = 10_000;
 const MAX_RECORDS_PER_OPERATION = NEXTCLOUD_MAX_CHUNKS + 20;
 const MAX_FILES_PER_OPERATION = MAX_RECORDS_PER_OPERATION + 128;
+const journalLocks = new WeakMap<DataAdapter, Map<string, AsyncMutex>>();
 
 export class TransferJournalStore {
   private readonly adapter: DataAdapter;
   private readonly root: string;
+  private readonly mutex: AsyncMutex;
 
   constructor(vault: Vault, pluginId: string, private readonly logger: Logger, deviceScope: string) {
     this.adapter = vault.adapter;
     this.root = `${getPluginDeviceRuntimeRoot(vault.configDir, pluginId, deviceScope)}/transfer/journal`;
+    let roots = journalLocks.get(this.adapter);
+    if (!roots) { roots = new Map(); journalLocks.set(this.adapter, roots); }
+    let mutex = roots.get(this.root);
+    if (!mutex) { mutex = new AsyncMutex(); roots.set(this.root, mutex); }
+    this.mutex = mutex;
   }
 
   async ensure(): Promise<void> {
@@ -28,6 +36,10 @@ export class TransferJournalStore {
   }
 
   async load(operationKey: string): Promise<TransferJournalRecord | null> {
+    return await this.mutex.runExclusive(() => this.loadUnlocked(operationKey));
+  }
+
+  private async loadUnlocked(operationKey: string): Promise<TransferJournalRecord | null> {
     assertKey(operationKey);
     await this.ensure();
     const dir = `${this.root}/${operationKey}`;
@@ -64,6 +76,10 @@ export class TransferJournalStore {
   }
 
   async listLatest(): Promise<TransferJournalRecord[]> {
+    return await this.mutex.runExclusive(() => this.listLatestUnlocked());
+  }
+
+  private async listLatestUnlocked(): Promise<TransferJournalRecord[]> {
     await this.ensure();
     const listing = await this.adapter.list(this.root);
     const output: TransferJournalRecord[] = [];
@@ -76,14 +92,18 @@ export class TransferJournalStore {
       .sort();
     for (const key of folders) {
       if (!/^[a-f0-9]{64}$/.test(key)) continue;
-      const record = await this.load(key);
+      const record = await this.loadUnlocked(key);
       if (record) output.push(record);
     }
     return output;
   }
 
   async create(payload: TransferJournalPayload): Promise<TransferJournalRecord> {
-    const existing = await this.load(payload.operationKey);
+    return await this.mutex.runExclusive(() => this.createUnlocked(payload));
+  }
+
+  private async createUnlocked(payload: TransferJournalPayload): Promise<TransferJournalRecord> {
+    const existing = await this.loadUnlocked(payload.operationKey);
     if (existing) return existing;
     const record = await this.buildRecord(payload, 1, null);
     await this.writeImmutable(record);
@@ -91,7 +111,11 @@ export class TransferJournalStore {
   }
 
   async append(current: TransferJournalRecord, patch: Partial<TransferJournalPayload>): Promise<TransferJournalRecord> {
-    const latest = await this.load(current.operationKey);
+    return await this.mutex.runExclusive(() => this.appendUnlocked(current, patch));
+  }
+
+  private async appendUnlocked(current: TransferJournalRecord, patch: Partial<TransferJournalPayload>): Promise<TransferJournalRecord> {
+    const latest = await this.loadUnlocked(current.operationKey);
     if (!latest || latest.sequence !== current.sequence || latest.recordHash !== current.recordHash) {
       throw new Error(`Transfer journal ${current.operationKey} advanced concurrently.`);
     }
@@ -102,6 +126,10 @@ export class TransferJournalStore {
   }
 
   async remove(operationKey: string): Promise<void> {
+    await this.mutex.runExclusive(() => this.removeUnlocked(operationKey));
+  }
+
+  private async removeUnlocked(operationKey: string): Promise<void> {
     assertKey(operationKey);
     const dir = `${this.root}/${operationKey}`;
     if (!(await this.adapter.exists(dir))) return;
@@ -127,7 +155,7 @@ export class TransferJournalStore {
 
     // Validate the full chain before removing anything. Descending removal
     // keeps any crash-interrupted remainder as a valid sequence-1 prefix.
-    await this.load(operationKey);
+    await this.loadUnlocked(operationKey);
     for (const name of recognized.reverse()) await this.adapter.remove(`${dir}/${name}`);
 
     const remaining = await this.adapter.list(dir);

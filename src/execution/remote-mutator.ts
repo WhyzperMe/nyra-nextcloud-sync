@@ -8,6 +8,7 @@ import { parseDavMultistatus } from "../remote/dav-xml";
 import { appendWebdavPath, normalizeRemoteRootPath, NYRA_REMOTE_RUNTIME_ROOT } from "../remote/path";
 import type { RemoteReplicaState } from "../state/durable/model";
 import { sha256Hex } from "../state/durable/crypto";
+import { AsyncMutex } from "../state/durable/mutex";
 import { randomId } from "../state/durable/ids";
 import { basicAuthorization } from "../security/base64";
 import { assertSameOrigin } from "../security/url-policy";
@@ -21,6 +22,8 @@ const PROPFIND_BODY = `<?xml version="1.0" encoding="UTF-8"?>\n<d:propfind xmlns
 const RETRYABLE = new Set([408, 423, 425, 429, 500, 502, 503, 504]);
 const INTERNAL_RUNTIME_ROOT = NYRA_REMOTE_RUNTIME_ROOT;
 const TRANSFER_IO_TIMEOUT_MS = 120_000;
+/** Pause between the two empty-folder listings when the server cannot condition a collection DELETE. */
+const COLLECTION_SETTLE_MS = 300;
 
 export interface RemoteDownloadResult {
   bytes: ArrayBuffer;
@@ -68,6 +71,9 @@ export class RemoteTransactionalMutator {
   private readonly maxAttempts: number;
   private readonly sleepFn: (ms: number) => Promise<void>;
   private readonly randomFn: () => number;
+  private readonly collectionConditionalCache = new Map<string, boolean>();
+  /** Parallel transfers into one new folder must not race each other's MKCOL (Nextcloud answers 423, not 405). */
+  private readonly directoryCreation = new AsyncMutex();
 
   constructor(
     private readonly http: HttpTransport,
@@ -272,51 +278,134 @@ export class RemoteTransactionalMutator {
         continue;
       }
       if (probe.status !== 404) this.assertSuccess(probe, [207, 404], `probe directory '${segment}'`);
-      try {
-        const created = await this.requestWithRetry({ url: current, method: "MKCOL", headers: this.headers({ "If-None-Match": "*" }) }, false);
-        if (![201, 405].includes(created.status)) this.assertSuccess(created, [201, 405], `create directory '${segment}'`);
-      } catch (error) {
-        // MKCOL can succeed server-side and lose its response. Reconcile the
-        // observable collection state before deciding the publish setup failed.
-        const afterAmbiguous = await this.requestWithRetry({
+      await this.directoryCreation.runExclusive(async () => {
+        // Another worker may have created it while this one waited for its turn.
+        const again = await this.requestWithRetry({
           url: current, method: "PROPFIND", contentType: "application/xml; charset=utf-8",
           headers: this.headers({ Depth: "0", Accept: "application/xml, text/xml;q=0.9" }), body: PROPFIND_BODY
-        }).catch(() => null);
-        if (!afterAmbiguous || afterAmbiguous.status !== 207 || !parseDavMultistatus(afterAmbiguous.text)[0]?.isCollection) throw error;
-        this.logger.warn("apply.remote-mkcol-ambiguous-commit-reconciled", { directoryPath, segment });
-      }
-      const verify = await this.requestWithRetry({
-        url: current, method: "PROPFIND", contentType: "application/xml; charset=utf-8",
-        headers: this.headers({ Depth: "0", Accept: "application/xml, text/xml;q=0.9" }), body: PROPFIND_BODY
+        });
+        if (again.status === 207) {
+          if (!parseDavMultistatus(again.text)[0]?.isCollection) throw new Error(`Remote path '${directoryPath}' contains a non-directory component '${segment}'.`);
+          return;
+        }
+        if (again.status !== 404) this.assertSuccess(again, [207, 404], `probe directory '${segment}'`);
+        try {
+          const created = await this.requestWithRetry({ url: current, method: "MKCOL", headers: this.headers({ "If-None-Match": "*" }) }, false);
+          if (![201, 405].includes(created.status)) this.assertSuccess(created, [201, 405], `create directory '${segment}'`);
+        } catch (error) {
+          // MKCOL can succeed server-side and lose its response. Reconcile the
+          // observable collection state before deciding the publish setup failed.
+          const afterAmbiguous = await this.requestWithRetry({
+            url: current, method: "PROPFIND", contentType: "application/xml; charset=utf-8",
+            headers: this.headers({ Depth: "0", Accept: "application/xml, text/xml;q=0.9" }), body: PROPFIND_BODY
+          }).catch(() => null);
+          if (!afterAmbiguous || afterAmbiguous.status !== 207 || !parseDavMultistatus(afterAmbiguous.text)[0]?.isCollection) throw error;
+          this.logger.warn("apply.remote-mkcol-ambiguous-commit-reconciled", { directoryPath, segment });
+        }
+        const verify = await this.requestWithRetry({
+          url: current, method: "PROPFIND", contentType: "application/xml; charset=utf-8",
+          headers: this.headers({ Depth: "0", Accept: "application/xml, text/xml;q=0.9" }), body: PROPFIND_BODY
+        });
+        this.assertSuccess(verify, [207], `verify directory '${segment}'`);
+        const row = parseDavMultistatus(verify.text)[0];
+        if (!row?.isCollection) throw new Error(`Remote directory '${directoryPath}' could not be verified.`);
       });
-      this.assertSuccess(verify, [207], `verify directory '${segment}'`);
-      const row = parseDavMultistatus(verify.text)[0];
-      if (!row?.isCollection) throw new Error(`Remote directory '${directoryPath}' could not be verified.`);
     }
   }
 
   /**
    * Deletes a collection only when a fresh Depth-1 listing shows no children.
-   * WebDAV has no non-recursive rmdir, so this narrow check is the guard: a
-   * child that appears in the milliseconds before the DELETE is recoverable from
-   * the Nextcloud trash bin. Collection ETags are not used as a precondition
-   * because Nextcloud propagates them from children and some storage backends
-   * restamp them after the listing.
+   * WebDAV has no non-recursive rmdir, so the check and the DELETE can never be atomic.
+   *
+   * Servers differ: some enforce `If-Match` on collections, others (observed on Nextcloud with CIFS
+   * storage) answer 412 even for the current ETag, which would make every folder deletion fail. The
+   * server is therefore probed once with a throw-away collection:
+   * - enforced: DELETE is conditioned on the listing ETag, a stale tag defers the deletion;
+   * - not enforced: the folder is listed twice a moment apart, both listings must be empty with an
+   *   unchanged ETag, and only then an unconditional DELETE is sent. This narrows the race but does
+   *   not close it; anything that slips in goes to the Nextcloud trash bin.
    */
   async removeEmptyDirectory(url: string, path: string): Promise<boolean> {
     const collectionUrl = ensureTrailingSlash(url);
+    const first = await this.listCollectionForRemoval(collectionUrl, path);
+    if (first === "missing") return true;
+    if (first === "occupied") return false;
+    if (await this.collectionDeleteIsConditional(collectionUrl, path)) {
+      const etag = first.etag;
+      if (!etag || etag.startsWith("W/")) return false;
+      const response = await this.requestWithRetry({ url: collectionUrl, method: "DELETE", headers: this.headers({ "If-Match": etag }) }, false);
+      if (response.status === 412 || response.status === 423) return false;
+      this.assertSuccess(response, [204, 404], `delete directory '${path}'`);
+      return true;
+    }
+    await this.sleepFn(COLLECTION_SETTLE_MS);
+    const second = await this.listCollectionForRemoval(collectionUrl, path);
+    if (second === "missing") return true;
+    if (second === "occupied" || (first.etag && second.etag && first.etag !== second.etag)) return false;
+    const response = await this.requestWithRetry({ url: collectionUrl, method: "DELETE", headers: this.headers() }, false);
+    this.assertSuccess(response, [204, 404], `delete directory '${path}'`);
+    return true;
+  }
+
+  private async listCollectionForRemoval(collectionUrl: string, path: string): Promise<"missing" | "occupied" | { etag: string | null }> {
     const listing = await this.requestWithRetry({
       url: collectionUrl, method: "PROPFIND", contentType: "application/xml; charset=utf-8",
       headers: this.headers({ Depth: "1", Accept: "application/xml, text/xml;q=0.9" }), body: PROPFIND_BODY
     });
-    if (listing.status === 404) return true;
+    if (listing.status === 404) return "missing";
     this.assertSuccess(listing, [207], `list directory '${path}'`);
     const rows = parseDavMultistatus(listing.text);
     if (!rows[0]?.isCollection) throw new Error(`Remote path '${path}' is not a directory.`);
-    if (rows.length > 1) return false;
-    const response = await this.requestWithRetry({ url: collectionUrl, method: "DELETE", headers: this.headers() }, false);
-    this.assertSuccess(response, [204, 404], `delete directory '${path}'`);
-    return true;
+    if (rows.length > 1) return "occupied";
+    return { etag: rows[0].etag };
+  }
+
+  /**
+   * Whether this server really enforces `If-Match` on collection DELETE: a wrong tag must give 412 and the
+   * current tag must succeed. Probed once per mutator in a throw-away collection inside the sync root's
+   * internal runtime folder; any doubt counts as "not enforced" and selects the conservative fallback.
+   */
+  private async collectionDeleteIsConditional(collectionUrl: string, path: string): Promise<boolean> {
+    const segments = path.split("/").filter(Boolean).length;
+    let rootUrl = collectionUrl;
+    for (let index = 0; index < segments; index += 1) rootUrl = rootUrl.replace(/[^/]+\/$/, "");
+    const key = rootUrl;
+    const cached = this.collectionConditionalCache.get(key);
+    if (cached !== undefined) return cached;
+    const probeUrl = `${ensureTrailingSlash(appendWebdavPath(rootUrl, INTERNAL_RUNTIME_ROOT))}${randomId("etag-probe-dir")}/`;
+    let enforced = false;
+    let created = false;
+    try {
+      await this.ensureDirectoryPath(rootUrl, INTERNAL_RUNTIME_ROOT);
+      const made = await this.requestWithRetry({ url: probeUrl, method: "MKCOL", headers: this.headers({ "If-None-Match": "*" }) }, false);
+      this.assertSuccess(made, [201], "create collection-delete probe");
+      created = true;
+      const state = await this.listCollectionForRemoval(probeUrl, "collection-delete probe");
+      const etag = typeof state === "object" ? state.etag : null;
+      if (etag && !etag.startsWith("W/")) {
+        const wrong = await this.requestWithRetry({ url: probeUrl, method: "DELETE", headers: this.headers({ "If-Match": '"nyra-not-the-current-etag"' }) }, false);
+        if (wrong.status === 412) {
+          const right = await this.requestWithRetry({ url: probeUrl, method: "DELETE", headers: this.headers({ "If-Match": etag }) }, false);
+          enforced = right.status === 204;
+          if (enforced) created = false;
+        } else if (wrong.status >= 200 && wrong.status < 300) created = false; // ignored the condition and deleted our own probe
+      }
+    } catch (error) {
+      this.logger.warn("remote.collection-delete-probe-failed", { error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (created) {
+        try {
+          // The probe collection has a random name and is empty, so an unconditional delete only removes our own folder.
+          const cleanup = await this.requestWithRetry({ url: probeUrl, method: "DELETE", headers: this.headers() }, false);
+          this.assertSuccess(cleanup, [204, 404], "remove collection-delete probe");
+        } catch (cleanupError) {
+          this.logger.warn("remote.collection-delete-probe-cleanup-deferred", { error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) });
+        }
+      }
+    }
+    this.collectionConditionalCache.set(key, enforced);
+    if (!enforced) this.logger.warn("remote.collection-delete-not-conditional", { note: "Server does not enforce If-Match on collections; using double-checked unconditional folder deletion." });
+    return enforced;
   }
 
   async uploadCreateFromSnapshot(url: string, path: string, snapshot: PreparedLocalSnapshot, onProgress?: TransferProgressCallback): Promise<RemoteTransferResult> {
@@ -588,7 +677,8 @@ export class RemoteTransactionalMutator {
     const serverChunks = await this.listUploadChunks(journal.uploadUrl);
     const uploaded = new Set<number>();
     for (let index = 0; index < snapshot.chunkCount; index += 1) {
-      const expectedSize = (await snapshot.readChunk(index)).byteLength;
+      // Only the length is needed; slicing the chunk out of the snapshot would copy it for nothing.
+      const expectedSize = chunkBounds(index, snapshot.size, snapshot.chunkSize).size;
       const actual = serverChunks.get(nextcloudChunkName(index));
       if (actual === expectedSize) uploaded.add(index);
     }
@@ -1143,7 +1233,9 @@ export class RemoteTransactionalMutator {
           this.logger.warn("remote.client-added-if-none-match", { method: request.method ?? "GET" });
           response = await this.http.request({ ...request, url: withCacheBuster(request.url) });
         }
-        const canRetry = retrySafe && RETRYABLE.has(response.status);
+        // 423 Locked is refused before the operation runs (another request holds the file lock), so repeating it
+        // is safe even for writes that are otherwise never retried blindly.
+        const canRetry = (retrySafe && RETRYABLE.has(response.status)) || response.status === 423;
         if (!canRetry || attempt === this.maxAttempts) return response;
         const delay = retryDelayMs(response, attempt, this.randomFn);
         this.logger.warn("apply.remote-retry", { method: request.method ?? "GET", status: response.status, attempt, delay });

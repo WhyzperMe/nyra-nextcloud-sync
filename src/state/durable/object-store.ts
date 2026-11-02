@@ -97,6 +97,15 @@ export class ObjectStore {
       if (size !== expectedSize) throw new Error(`Chunked object stream size mismatch: expected ${expectedSize}, received ${size}.`);
       if (actualHash !== expectedHash) throw new Error(`Chunked object stream SHA-256 mismatch: expected ${expectedHash}, received ${actualHash}.`);
 
+      // Hashing the incoming chunks proves the source, not what the adapter
+      // actually persisted. Verify the staged object before it can become BASE.
+      const stagedSize = await this.backend.statSize(staging);
+      if (stagedSize !== expectedSize) throw new Error(`Staged object has size ${stagedSize ?? "missing"}; expected ${expectedSize}.`);
+      const stagedBytes = await this.backend.readBinary(staging);
+      if (stagedBytes.byteLength !== expectedSize || await sha256Hex(stagedBytes) !== expectedHash) {
+        throw new Error("Staged BASE object failed SHA-256 read-back verification.");
+      }
+
       if (await this.backend.exists(finalPath)) {
         if (!(await this.hasVerified(expectedHash, expectedSize))) throw new Error(`Immutable object collision at ${finalPath}.`);
         return { hash: expectedHash, size: expectedSize };
@@ -108,9 +117,7 @@ export class ObjectStore {
         if (!(await this.hasVerified(expectedHash, expectedSize))) throw error;
         return { hash: expectedHash, size: expectedSize };
       }
-      // The staged byte stream was already incrementally hashed before the atomic
-      // rename. Re-reading a multi-gigabyte object through Obsidian DataAdapter
-      // would re-materialize it in memory for no additional mutation boundary.
+      // The staged bytes were read back and verified before publication.
       const committedSize = await this.backend.statSize(finalPath);
       if (committedSize !== expectedSize) throw new Error(`Committed chunked object ${expectedHash} has size ${committedSize ?? "missing"}; expected ${expectedSize}.`);
       return { hash: expectedHash, size: expectedSize };

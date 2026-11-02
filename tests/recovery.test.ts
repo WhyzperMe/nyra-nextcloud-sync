@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { evaluateDeleteGuard } from "../src/execution/delete-guard";
+import { DeletionHold } from "../src/execution/deletion-hold";
 import type { SyncPlan, SyncPlanItem, SyncPlanStep } from "../src/planner/types";
 import { DeletionLedger } from "../src/recovery/deletion-ledger";
 import { NextcloudTrash } from "../src/recovery/nextcloud-trash";
@@ -140,7 +141,7 @@ describe("deletion hold", () => {
 
     expect(hold.approve()).toBe(true);
     expect(hold.evaluate(big, 20, 1000).decision.held).toBe(false);
-    expect(hold.folderLimit(20)).toBeUndefined();
+    expect(hold.folderLimit(20)).toBe(20);
     expect(hold.evaluate(deletes(45), 20, 1000).decision.held).toBe(true); // larger than what was approved
     hold.consumeApproval();
     expect(hold.summary()).toBeNull();
@@ -178,6 +179,59 @@ describe("deletion hold", () => {
     expect(remote.autoApprove(grace, 0.1, 1000)).toBe(false); // Nextcloud is never changed without a person
     expect(remote.summary()).not.toBeNull();
     expect(new DeletionHold(() => now).autoApprove(grace, 0.1, 1000)).toBe(false); // nothing pending
+  });
+
+  it("invalidates approval and restarts the wait when the deletion identity changes", () => {
+    let now = 1_000_000;
+    const hold = new DeletionHold(() => now);
+    const original = deletes(30, "delete-local");
+    const changed = deletes(30, "delete-local");
+    changed.items[0]!.entryId = "different-entry";
+    hold.evaluate(original, 20, 1000);
+    hold.approve();
+    now += 600_000;
+    expect(hold.evaluate(changed, 20, 1000).decision.held).toBe(true);
+    expect(hold.autoApprove(600_000, 0.1, 1000)).toBe(false);
+    now += 600_000;
+    expect(hold.autoApprove(600_000, 0.1, 1000)).toBe(true);
+  });
+
+  it("binds folder approval to exact paths and sides, independently of file approvals", () => {
+    const hold = new DeletionHold();
+    expect(hold.approveFolderPlan([], ["a", "b"], 1)).toBe(false);
+    expect(hold.approve()).toBe(true);
+    expect(hold.approveFolderPlan([], ["a", "c"], 1)).toBe(false);
+    expect(hold.approve()).toBe(true);
+    expect(hold.approveFolderPlan(["a", "c"], [], 1)).toBe(false);
+    expect(hold.approve()).toBe(true);
+    expect(hold.approveFolderPlan(["c", "a"], [], 1)).toBe(true);
+  });
+
+  it("keeps a changed smaller batch on hold across repeated planning", () => {
+    const hold = new DeletionHold();
+    hold.evaluate(deletes(30), 20, 1000);
+    hold.approve();
+    const smaller = deletes(2);
+    expect(hold.evaluate(smaller, 20, 1000).decision.held).toBe(true);
+    expect(hold.evaluate(smaller, 20, 1000).decision.held).toBe(true);
+    expect(hold.approve()).toBe(true);
+    expect(hold.evaluate(smaller, 20, 1000).decision.held).toBe(false);
+
+    const folders = new DeletionHold();
+    expect(folders.approveFolderPlan([], ["a", "b", "c"], 2)).toBe(false);
+    folders.approve();
+    expect(folders.approveFolderPlan([], ["other"], 2)).toBe(false);
+    expect(folders.approveFolderPlan([], ["other"], 2)).toBe(false);
+    folders.approve();
+    expect(folders.approveFolderPlan([], ["other"], 2)).toBe(true);
+  });
+
+  it("invalidates approval if the durable plan anchor changes", () => {
+    const hold = new DeletionHold();
+    const first = { ...deletes(30), storeId: "store", stateGeneration: "1", walSequence: "10", walHash: "a" };
+    hold.evaluate(first, 20, 1000);
+    hold.approve();
+    expect(hold.evaluate({ ...first, walSequence: "11", walHash: "b" }, 20, 1000).decision.held).toBe(true);
   });
 
   it("holds a wiped side at any size and never releases it by itself", async () => {

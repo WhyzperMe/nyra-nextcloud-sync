@@ -19,6 +19,9 @@ export function describeStatusBar(input: StatusBarInput): { text: string; detail
   const { settings, health, auto } = input;
   if (input.syncBusy) {
     const active = input.execution;
+    if ((active?.activeOperations ?? 0) > 1) {
+      return { text: "Nextcloud · syncing", detail: `${active!.activeOperations} file operations running · ${active!.completedSteps}/${active!.totalSteps} verified steps` };
+    }
     if (active?.activePath) {
       const action = active.activeAction === "upload" ? "Uploading"
         : active.activeAction === "download" ? "Downloading"

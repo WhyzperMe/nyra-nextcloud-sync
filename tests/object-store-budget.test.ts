@@ -13,6 +13,22 @@ class ReadCountingBackend extends MemoryStateBackend {
 }
 
 describe("BASE object whole-buffer memory limit", () => {
+  it("rejects same-size corruption written by the adapter before publishing a BASE object", async () => {
+    class CorruptBackend extends MemoryStateBackend {
+      override async appendBinary(path: string, data: ArrayBuffer): Promise<void> {
+        const copy = new Uint8Array(data.slice(0));
+        if (path.startsWith("objects/.staging/") && copy.length) copy[0] = copy[0]! ^ 1;
+        await super.appendBinary(path, copy.buffer);
+      }
+    }
+    const backend = new CorruptBackend();
+    const bytes = Uint8Array.from([1, 2, 3, 4]).buffer;
+    const hash = await sha256Hex(bytes);
+    async function* chunks() { yield bytes; }
+    await expect(new ObjectStore(backend, 64).putChunks(chunks(), hash, bytes.byteLength)).rejects.toThrow(/read-back verification/);
+    expect(await backend.exists(`objects/${hash.slice(0, 2)}/${hash}.blob`)).toBe(false);
+  });
+
   it("refuses an oversized object before materializing bytes for verification", async () => {
     const backend = new ReadCountingBackend();
     const bytes = Uint8Array.from([1, 2, 3, 4, 5]).buffer;

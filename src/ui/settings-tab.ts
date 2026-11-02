@@ -245,7 +245,7 @@ export class NyraNextcloudSyncSettingTab extends PluginSettingTab {
     title.createSpan({ text: "Diagnostics" });
     new Setting(advanced)
       .setName("Test this device's storage")
-      .setDesc("Writes, reads back, appends, renames and lists scratch files to prove that this device's file layer behaves. Run it on the phone and send me any line marked as failed.")
+      .setDesc("Checks writes, reads, appends, renames and listings in scratch files. A passing test does not prove crash durability. On your phone, note any failed checks.")
       .addButton((button) => button.setButtonText(this.busy.has("selftest") ? "Testing…" : "Run test").setDisabled(this.busy.has("selftest") || this.owner.isSyncBusy()).onClick(() => {
         void this.run("selftest", async () => {
           const checks = await this.owner.runStorageSelfTest();
@@ -644,6 +644,16 @@ export class NyraNextcloudSyncSettingTab extends PluginSettingTab {
     details.appendChild(body);
     containerEl.appendChild(details);
 
+    new Setting(body).setName("Parallel file transfers").setDesc("1–8 independent files; 1 keeps serial execution. Deletes and conflicting paths stay serial.")
+      .addText((text) => {
+        text.setPlaceholder("1").setValue(String(this.owner.settings.transferConcurrency)).setDisabled(this.owner.isSyncBusy());
+        this.commitOnBlur(text, (value) => {
+          const parsed = Number.parseInt(value, 10);
+          if (Number.isFinite(parsed)) this.queueSettingsWrite((settings) => { settings.transferConcurrency = parsed; });
+          else { new Notice("Enter a whole number from 1 to 8."); this.display(); }
+        });
+      });
+    this.renderMiBSetting(body, "Transfer memory budget", "Estimated in-flight memory, capped by this device's safety limit; a large file runs alone.", this.owner.settings.transferMemoryMiB, "32", (settings, value) => { settings.transferMemoryMiB = value; });
     this.renderMiBSetting(body, "Chunked upload threshold", "5–512 MiB.", this.owner.settings.transferChunkUploadThresholdMiB, "16", (settings, value) => { settings.transferChunkUploadThresholdMiB = value; });
     this.renderMiBSetting(body, "Upload chunk size", "5–512 MiB; automatically enlarged when needed.", this.owner.settings.transferUploadChunkMiB, "16", (settings, value) => { settings.transferUploadChunkMiB = value; });
     this.renderMiBSetting(body, "Download range size", "1–64 MiB.", this.owner.settings.transferDownloadRangeMiB, "8", (settings, value) => { settings.transferDownloadRangeMiB = value; });
